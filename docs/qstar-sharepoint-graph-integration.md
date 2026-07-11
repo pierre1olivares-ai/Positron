@@ -1,0 +1,287 @@
+# Q-Star Issue Manager — SharePoint & Microsoft Graph integration guide
+
+This document is the bridge between the standalone test build (`qstar-issue-manager.jsx`) and the production deployment in your repository. It covers three things:
+
+1. The **field mapping** between the app's data model and the SharePoint list that backs the register.
+2. The **Microsoft Graph data layer** that replaces the local `window.storage` calls.
+3. The **Power Automate reminder flow** that reproduces the app's simulated reminder engine.
+
+Everything here mirrors the logic already implemented in the app, so the production version behaves the same way the test build does.
+
+---
+
+## 1. Data flow overview
+
+The system runs in two phases, exactly as modelled in the app.
+
+**Phase 1 — Intake (anyone).** An employee submits the Q-Star **Microsoft Form**. A Power Automate flow (triggered by *When a new response is submitted*) creates a SharePoint list item with `Status` empty, `Triaged = No` and `Task Created = No`. This is the triage queue.
+
+**Phase 2 — Triage and tracking (Quality Team).** The Quality Manager opens the item in the app, classifies it (`Transformed into`), assigns a `Task Owner` and `Due Date`, and sets `Triaged = Yes`. From there the item is tracked through its status lifecycle until it is `Closed` or `Rejected`. The app reads and writes the list through Microsoft Graph; the reminder flow runs independently on a daily schedule.
+
+```
+Q-Star MS Form ──(flow: on form response)──▶ SharePoint list item  (Triaged=No)
+                                                      │
+                                  React app via Graph │  QM triage, owner work
+                                                      ▼
+                                              status lifecycle ──▶ Closed / Rejected
+                                                      ▲
+                  Daily reminder flow (recurrence) ───┘  reads list, sends Owner/QM/BU notices
+```
+
+---
+
+## 2. SharePoint list — column reference
+
+Create one list, suggested name **`Q-Star Issues`**, on your Quality site. Below, "Source" indicates whether the column already exists in your current list, or is **new** (added to support owner assignment and the NC effectiveness-test lifecycle).
+
+A note on **internal names**: SharePoint derives the internal name from the display name at creation time (spaces become `_x0020_`). To keep Graph calls clean, create each column with the simple internal name shown below first, then rename the *display* name afterwards. The internal name is what you use in Graph `fields` objects and `$filter`.
+
+### 2.1 Intake fields (already in your list)
+
+| App field (`issue.*`) | Display name | Internal name | SharePoint type | Notes |
+|---|---|---|---|---|
+| `qsNumber` | Qs Number | `QsNumber` | Number | Sequential business key shown as `QS-{n}`. |
+| `id` | ID | `ID` | Number | SharePoint's own item ID; do not create — use the built-in. |
+| `shortSummary` | Short Summary | `ShortSummary` | Single line / multiline | One-line title. |
+| `description` | Description | `Description` | Multiline (plain) | |
+| `immediateAction` | Immediate Action taken | `ImmediateAction` | Multiline (plain) | |
+| `severity` | Severity | `Severity` | Choice | Critical / High / Medium / Low. Drives the default due date. |
+| `createdBy` | Created by | `ReportedBy` | Person *or* text | See §4.3 on person columns. Store the reporter's email if you want them notified. |
+| `reportDate` | Report date | `ReportDate` | Date | |
+| `departmentBU` | Department/Business Unit | `DepartmentBU` | Choice | 23 business units (see §3). |
+| `region` | Region | `Region` | Choice | 7 regions. |
+| `alreadyInContact` | Already in Contact | `AlreadyInContact` | Choice (Yes/No) | |
+| `deviationType` | Deviation Type | `DeviationType` | Choice | 8 types. |
+| `issueOrigin` | Origin | `Origin` | Choice | Customer Complaints or Claims / Internal Finding. |
+| `attachments` | Attachment | (list attachments) | Attachment / library | See §4.4 — attachments are handled outside the `fields` object. |
+| `additionalComments` | Additional Comments | `AdditionalComments` | Multiline (plain) | |
+
+### 2.2 QM assessment fields (already in your list)
+
+| App field | Display name | Internal name | Type | Notes |
+|---|---|---|---|---|
+| `followUp` | Follow up | `FollowUp` | Multiline (plain) | General QM notes. |
+| `status` | Status | `Status` | Choice | **Add the new value** — see §2.4. |
+| `transformedInto` | Transformed into | `TransformedInto` | Choice | OFI / NC Minor / NC Major / Only sent to Dept/BU for Action. |
+| `taskCreated` | Task Created | `TaskCreated` | Choice (Yes/No) | Default `No`; set `Yes` when a tracked task is created at triage. |
+
+### 2.3 New columns to add
+
+These back the owner-assignment, escalation, §10.2 corrective-action and NC effectiveness-test features.
+
+| App field | Display name | Internal name | Type | Notes |
+|---|---|---|---|---|
+| `triaged` | Triaged | `Triaged` | Choice (Yes/No) | Default `No`. Set `Yes` on the QM's first save. Distinguishes the triage queue from the register. |
+| `taskOwner` | Task Owner | `TaskOwner` | Person | The named owner who receives reminders. Store/resolve email for notifications. |
+| `ownerBU` | Escalation BU | `EscalationBU` | Choice | BU lead notified on 7-day overdue escalation. Defaults to `DepartmentBU`. |
+| `dueDate` | Due Date | `DueDate` | Date | Auto-set from severity SLA at triage, QM-overridable. |
+| `rootCause` | Root Cause | `RootCause` | Multiline | NC only (§10.2). |
+| `correctiveAction` | Corrective Action | `CorrectiveAction` | Multiline | NC only. |
+| `implementationDate` | Implementation Date | `ImplementationDate` | Date | NC only. **Start of the 2-month effectiveness test.** |
+| `effectivenessCheck` | Effectiveness Check | `EffectivenessCheck` | Multiline | NC only. Evidence the fix held. |
+| `verifiedBy` | Verified By | `VerifiedBy` | Person | NC only. Required before closing. |
+| `verifiedDate` | Verified Date | `VerifiedDate` | Date | NC only. |
+| `closedDate` | Closed Date | `ClosedDate` | Date | Stamped when status moves to Closed. |
+
+### 2.4 Status choice — add the new value
+
+The app introduces one new status used **only** by the NC effectiveness-test lifecycle. Add it to the `Status` choice column so the full set is:
+
+```
+Created
+In Progress
+Under Testing/Revision      ← NEW (NC only)
+On Hold
+Closed
+Rejected
+```
+
+`Under Testing/Revision` is an active (open) status but is deliberately **excluded from overdue logic** — see §5.3.
+
+### 2.5 Progress log — recommended as a child list
+
+The app keeps an **append-only, timestamped** progress log (`{ ts, author, text }[]`). Two production options:
+
+- **Recommended: a separate list `Q-Star Progress Log`** with columns `ParentItemId` (Number, lookup to the issue's `ID`), `Author` (Person/text), `EntryDate` (DateTime), `Text` (Multiline). Append-only is enforced by only ever creating items, never editing. The app fetches entries with `$filter=fields/ParentItemId eq {id}` ordered by `EntryDate`.
+- **Simpler: a multiline column** `ProgressLog` with *Append Changes to Existing Text* enabled and list versioning on. SharePoint then stamps each addition with author and time automatically. This is easy but harder to render as structured entries.
+
+The child list is closer to the app's model and is what the rest of this guide assumes.
+
+---
+
+## 3. Choice column allowed values
+
+For reference when creating the choice columns (and when validating in the form/flow).
+
+**Severity:** Critical, High, Medium, Low.
+
+**Status:** Created, In Progress, Under Testing/Revision, On Hold, Closed, Rejected.
+
+**Transformed into:** OFI, NC Minor, NC Major, Only sent to Dept/BU for Action. *(REC is reserved for forward-compatibility in the dashboard category chart but is not yet a taxonomy value — add it here and to `categoryOf` in the app if/when you adopt it.)*
+
+**Deviation Type:** Communication, Compliance, Documentation, Equipment, Process, Quality, Safety, System.
+
+**Origin:** Customer Complaints or Claims, Internal Finding.
+
+**Region:** Germany, Americas, Asia Pacific, China, Eastern Europe, Head Office, Western Europe.
+
+**Department/Business Unit (and Escalation BU):** BU Aftermarket, BU Airlines, BU Automotive, BU Diplo & High Security, BU High Tech & SemiCon, BU Life Science, Central Europe & Commercial Services, IT, Legal & Data Protection, Marketing, Network & Products, Quality, Risk Management, Strategy & Transformation, tmCT FRA, tmCT MUC, tmCT MEX/NLU, tmCT PVG. *(Extend to the full set used on your live form.)*
+
+---
+
+## 4. Microsoft Graph data layer
+
+This replaces the app's `window.storage` calls. In the test build, the whole register lives under the storage key `qstar:issues:v1` and settings under `qstar:settings:v1`. In production, each issue is a SharePoint list item and you swap the storage module for a thin Graph client.
+
+### 4.1 App registration (Entra ID)
+
+Register a single-page application in Entra ID:
+
+- **Platform:** SPA, redirect URI = your hosted app URL. Use **MSAL.js** with the authorization-code + PKCE flow.
+- **Delegated scopes:** `User.Read`, `Sites.ReadWrite.All` *(or, for least privilege, `Sites.Selected` granted only on the Quality site — see §4.5)*, and `GroupMember.Read.All` to drive profile gating (§4.6).
+- **Admin consent** for the tenant on the above scopes.
+
+The reminder flow runs separately under its own connection/service identity (§5), not the user's token.
+
+### 4.2 Resolving site and list IDs
+
+Resolve once and cache:
+
+```
+GET /sites/{hostname}:/sites/Quality                      → siteId
+GET /sites/{siteId}/lists?$filter=displayName eq 'Q-Star Issues'   → listId
+```
+
+### 4.3 Reading and writing items
+
+List items carry their column data inside a `fields` object; always expand it.
+
+```http
+# Register (all triaged items) — maps to load of qstar:issues:v1
+GET /sites/{siteId}/lists/{listId}/items?expand=fields&$top=2000
+
+# Triage queue (untriaged)
+GET /sites/{siteId}/lists/{listId}/items?expand=fields&$filter=fields/Triaged eq 'No'
+
+# Create an item (Phase-1 intake done by the form flow, or app submit)
+POST /sites/{siteId}/lists/{listId}/items
+{ "fields": { "ShortSummary": "...", "Severity": "High", "Status": null, "Triaged": "No", "TaskCreated": "No", ... } }
+
+# Update on QM save / owner update — maps to updateIssue()
+PATCH /sites/{siteId}/lists/{listId}/items/{itemId}/fields
+{ "Status": "Under Testing/Revision", "ImplementationDate": "2026-06-19", "TaskOwner": ... }
+```
+
+Filtering on non-indexed columns needs the header `Prefer: HonorNonIndexedQueriesWarningMayFailRandomly`, or index `Status`, `Triaged` and `DueDate` on the list (recommended for performance and for the reminder flow).
+
+**Person columns** (`TaskOwner`, `VerifiedBy`, `ReportedBy`) are written by **LookupId**, not name. Resolve the user first (`GET /users/{email}` → `id`, then ensure they exist in the site user info list) and set `TaskOwnerLookupId`. If you prefer to keep the test build's simplicity, make these **text** columns storing the display name plus a separate `*Email` text column for notifications — this avoids the lookup dance and is perfectly adequate for a first cut.
+
+### 4.4 Attachments
+
+Graph's support for classic SharePoint **list-item attachments** is limited. Two clean options:
+
+- Store uploaded files in a **document library** and keep a hyperlink/`driveItem` reference column on the issue. This is the more Graph-native approach.
+- Or keep classic list attachments and manage them via the SharePoint REST endpoint `/_api/web/lists/.../items({id})/AttachmentFiles` rather than Graph.
+
+The test build treats attachments as a placeholder, so this is greenfield either way.
+
+### 4.5 Least privilege with `Sites.Selected`
+
+Rather than tenant-wide `Sites.ReadWrite.All`, register the app with `Sites.Selected` and have an admin grant write access to just the Quality site:
+
+```http
+POST /sites/{siteId}/permissions
+{ "roles": ["write"], "grantedToIdentities": [{ "application": { "id": "{clientId}", "displayName": "Q-Star" } }] }
+```
+
+### 4.6 Profile gating from Entra groups
+
+The app's Admin / Quality Manager / Task Owner switcher is a front-end simulation. In production, map each profile to an Entra **security group** and resolve it at sign-in:
+
+```
+GET /me/memberOf            → set profile = admin | qm | owner
+```
+
+Keep the in-app switcher as a developer-only fallback (e.g. behind a debug flag). The tab visibility (`TABS` map in the app) then follows the resolved profile, and the IT-settings tab stays restricted to the Admin group.
+
+### 4.7 Settings storage
+
+The `qstar:settings:v1` object (form URL, flow ID, site URL, list name, tenant/client IDs) can live in a small single-item **config list** or in app configuration. The IT-settings tab in the app reads/writes it; in production it's mostly read-only runtime config plus the editable MS Form URL surfaced to reporters.
+
+---
+
+## 5. Reminder engine → Power Automate flow
+
+The app's `buildReminders()` function simulates notifications. In production, reproduce it with a **scheduled cloud flow**. The rules below are exactly what the app implements, so behaviour stays identical.
+
+### 5.1 Derived dates
+
+- **Due date** is stored on the item (`DueDate`), set at triage from the severity SLA and QM-overridable. The default SLA, applied when the QM accepts the auto value: **Critical = 7, High = 14, Medium = 30, Low = 60** days from the report date.
+- **Test end** (NC only) `= ImplementationDate + 2 months`. Compute in the flow with `addToTime(ImplementationDate, 2, 'Month')`.
+
+### 5.2 Reminder rules
+
+| # | Applies to | Trigger day | Recipient | Channel | Urgency |
+|---|---|---|---|---|---|
+| 1 | Open, not under test | `DueDate − 3` | Task Owner | Email/Teams | info (heads-up) |
+| 2 | Open, not under test | `DueDate` | Task Owner | Email/Teams | warn (due today) |
+| 3 | Open, not under test | every 3 days after `DueDate` (cap ~30d) | Task Owner | Email/Teams | danger (overdue nudge) |
+| 4 | Overdue | `DueDate + 1` | Quality Team | Email/Teams | danger (QM alert) |
+| 5 | Overdue ≥ 7d | `DueDate + 7` | Escalation BU lead | Email/Teams | danger (escalation) |
+| 6 | NC under test | `TestEnd − 7` | Task Owner | Email/Teams | info (test ending soon) |
+| 7 | NC under test | `TestEnd` | Task Owner **and** Quality Team | Email/Teams | warn (verify & close) |
+
+### 5.3 Branching rule (important)
+
+An item with `Status = Under Testing/Revision` is **open but not overdue**. The flow must:
+
+- **Skip** rules 1–5 for it (no due-date chasing while the corrective action is being observed), and
+- **Apply** rules 6–7 instead (effectiveness-check reminders around the test end date).
+
+This matches `isOverdue()` in the app, which excludes the `Under Testing/Revision` status, and the `inNCTest()` branch in `buildReminders()`.
+
+### 5.4 Flow structure
+
+```
+Recurrence (daily, e.g. 07:00 local)
+└─ Get items: filter  Status ne 'Closed' and Status ne 'Rejected' and TaskCreated eq 'Yes'
+   └─ Apply to each item
+      ├─ Compose: daysToDue   = dateDifference(utcNow(), DueDate)
+      ├─ Compose: testEnd     = addToTime(ImplementationDate, 2, 'Month')
+      ├─ Condition: Status == 'Under Testing/Revision' ?
+      │     ├─ YES → evaluate rules 6–7 against testEnd
+      │     └─ NO  → evaluate rules 1–5 against DueDate
+      ├─ Send Outlook email / Post Teams message to the matched recipient(s)
+      └─ Upsert a Reminder Log entry (dedupe — see 5.5)
+```
+
+Use the **Office 365 Outlook** connector for email and/or **Microsoft Teams** (*Post message*) for chat notifications. Resolve recipients from the person columns (or the `*Email` text columns if you took the simpler route in §4.3).
+
+### 5.5 De-duplication
+
+A daily schedule naturally fires once per day, but you still need to avoid re-sending the same milestone. Two approaches:
+
+- **Reminder Log list** keyed by `ItemId + RuleType + Date`: before sending, check whether a matching entry already exists today; create one after sending. Cleanest and auditable.
+- **Last-notified field** on the item (`LastReminderType`, `LastReminderDate`): only send if the computed rule for today differs from what's recorded.
+
+The overdue nudge (rule 3) is the every-3-days case — gate it on `mod(daysOverdue, 3) == 0` so it fires on day 3, 6, 9, … rather than daily.
+
+### 5.6 Intake flow (Phase 1)
+
+Separately, a second flow handles intake: trigger **When a new response is submitted** on the Q-Star form → *Get response details* → **Create item** in `Q-Star Issues` with `Status` empty, `Triaged = No`, `TaskCreated = No`, and `QsNumber` from your sequence (a counter item or `max(QsNumber)+1`). This is the production equivalent of the app's `addIntake()`.
+
+---
+
+## 6. Replication checklist
+
+1. Create the `Q-Star Issues` list; add the new columns (§2.3) and the `Under Testing/Revision` status value (§2.4). Index `Status`, `Triaged`, `DueDate`.
+2. Create the `Q-Star Progress Log` child list (§2.5) and, if used, the config list (§4.7).
+3. Register the Entra SPA app; grant `Sites.Selected` on the Quality site (§4.5); create the three profile groups (§4.6).
+4. Swap the app's `window.storage` module for a Graph client implementing load / create / patch / progress-append against the list (§4.3). Keep the same object shapes so the components are untouched.
+5. Wire the IT-settings tab values to runtime config; surface the MS Form URL to reporters (already done in the app).
+6. Build the **intake flow** (§5.6) and the **daily reminder flow** (§5.4) reproducing rules 1–7, including the under-test branch (§5.3) and dedupe (§5.5).
+7. Verify against the seeded scenarios: an overdue task (rules 3–5), an NC mid-test (rule 6), and an NC whose test window has elapsed (rule 7, then QM verify-and-close unlocks).
+
+---
+
+*Field names, choice values, SLA days, the 2-month NC test period, and the reminder timings above are taken directly from the test build so the production system reproduces its behaviour one-for-one.*
