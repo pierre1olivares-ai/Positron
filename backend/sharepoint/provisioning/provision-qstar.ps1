@@ -37,7 +37,7 @@ $STATUS     = "Created","In Progress","Under Testing/Revision","On Hold","Closed
 $TRANSFORM  = "OFI","NC Minor","NC Major","Only sent to Dept/BU for Action"   # add "REC" when adopted
 $DEVIATION  = "Communication","Compliance","Documentation","Equipment","Process","Quality","Safety","System"
 $ORIGIN     = "Customer Complaints or Claims","Internal Finding"
-$REGION     = "Germany","Americas","Asia Pacific","China","Eastern Europe","Head Office","Western Europe"
+$REGION     = "Americas (Miami)","Asia Pacific","China (Shanghai)","Eastern Europe (Vienna)","Head Office (Neu-Isenburg)","Western Europe (Amsterdam)"
 $YESNO      = "Yes","No"
 $BU = @(
   "BU Aftermarket","BU Airlines","BU Automotive","BU Diplo & High Security",

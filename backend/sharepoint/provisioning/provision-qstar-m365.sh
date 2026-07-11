@@ -37,7 +37,7 @@ STATUS_XML="$(mk_choices "Created" "In Progress" "Under Testing/Revision" "On Ho
 TRANSFORM_XML="$(mk_choices "OFI" "NC Minor" "NC Major" "Only sent to Dept/BU for Action")"   # add "REC" when adopted
 DEVIATION_XML="$(mk_choices "Communication" "Compliance" "Documentation" "Equipment" "Process" "Quality" "Safety" "System")"
 ORIGIN_XML="$(mk_choices "Customer Complaints or Claims" "Internal Finding")"
-REGION_XML="$(mk_choices "Germany" "Americas" "Asia Pacific" "China" "Eastern Europe" "Head Office" "Western Europe")"
+REGION_XML="$(mk_choices "Americas (Miami)" "Asia Pacific" "China (Shanghai)" "Eastern Europe (Vienna)" "Head Office (Neu-Isenburg)" "Western Europe (Amsterdam)")"
 YESNO_XML="$(mk_choices "Yes" "No")"
 BU_XML="$(mk_choices "BU Aftermarket" "BU Airlines" "BU Automotive" "BU Diplo & High Security" \
   "BU High Tech & SemiCon" "BU Life Science" "Central Europe & Commercial Services" \

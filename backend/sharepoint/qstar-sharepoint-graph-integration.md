@@ -131,7 +131,7 @@ For reference when creating the choice columns (and when validating in the form/
 
 **Origin:** Customer Complaints or Claims, Internal Finding.
 
-**Region:** Germany, Americas, Asia Pacific, China, Eastern Europe, Head Office, Western Europe.
+**Region:** Americas (Miami), Asia Pacific, China (Shanghai), Eastern Europe (Vienna), Head Office (Neu-Isenburg), Western Europe (Amsterdam).
 
 **Department/Business Unit (and Escalation BU):** BU Aftermarket, BU Airlines, BU Automotive, BU Diplo & High Security, BU High Tech & SemiCon, BU Life Science, Central Europe & Commercial Services, IT, Legal & Data Protection, Marketing, Network & Products, Quality, Risk Management, Strategy & Transformation, tmCT FRA, tmCT MUC, tmCT MEX/NLU, tmCT PVG. *(Extend to the full set used on your live form.)*
 

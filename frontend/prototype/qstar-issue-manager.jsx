@@ -29,7 +29,7 @@ const statusOptionsFor = (i) => i && isNC(i) ? ["Created", "In Progress", NC_TES
 const TRANSFORM_TYPES = ["OFI", "NC Minor", "NC Major", "Only sent to Dept/BU for Action"];
 const DEVIATION_TYPES = ["Communication", "Compliance", "Documentation", "Equipment", "Process", "Quality", "Safety", "System"];
 const ORIGINS = ["Customer Complaints or Claims", "Internal Finding"];
-const REGIONS = ["Germany", "Americas", "Asia Pacific", "China", "Eastern Europe", "Head Office", "Western Europe"];
+const REGIONS = ["Americas (Miami)", "Asia Pacific", "China (Shanghai)", "Eastern Europe (Vienna)", "Head Office (Neu-Isenburg)", "Western Europe (Amsterdam)"];
 const YESNO = ["Yes", "No"];
 const BUSINESS_UNITS = [
   "BU Aftermarket", "BU Airlines", "BU Automotive", "BU Diplo & High Security",
@@ -115,7 +115,7 @@ function seed() {
       description: "A Life Science consignment left FRA with a label showing the wrong temperature band (2–8°C printed as 15–25°C). Caught at the gateway before dispatch.",
       immediateAction: "Shipment held, relabelled, cold chain re-verified before release.",
       severity: "High", createdBy: "T. Schmidt", reportDate: addDays(T, -1),
-      departmentBU: "BU Life Science", region: "Western Europe", alreadyInContact: "Yes",
+      departmentBU: "BU Life Science", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Documentation", issueOrigin: "Internal Finding", taskOwner: "", dueDate: "",
     }),
     mk({
@@ -124,7 +124,7 @@ function seed() {
       description: "Customer reports an AOG aircraft part arrived with a dented protective case. Goods usable but customer requests root-cause feedback.",
       immediateAction: "Acknowledged claim, requested photos from customer.",
       severity: "Medium", createdBy: "M. Albrecht", reportDate: addDays(T, -2),
-      departmentBU: "BU Airlines", region: "Germany", alreadyInContact: "No",
+      departmentBU: "BU Airlines", region: "Western Europe (Amsterdam)", alreadyInContact: "No",
       deviationType: "Process", issueOrigin: "Customer Complaints or Claims", taskOwner: "", dueDate: "",
     }),
     mk({
@@ -133,7 +133,7 @@ function seed() {
       description: "Operator suggests a barcode checkpoint at the MUC inbound dock to reduce manual reconciliation effort.",
       immediateAction: "—",
       severity: "Low", createdBy: "K. Wagner", reportDate: addDays(T, -3),
-      departmentBU: "tmCT MUC", region: "Germany", alreadyInContact: "No",
+      departmentBU: "tmCT MUC", region: "Western Europe (Amsterdam)", alreadyInContact: "No",
       deviationType: "Process", issueOrigin: "Internal Finding", taskOwner: "", dueDate: "",
     }),
 
@@ -144,7 +144,7 @@ function seed() {
       description: "Data logger shows a 3-hour temperature excursion above 8°C on a high-value pharma shipment. Product quarantined pending stability assessment.",
       immediateAction: "Shipment quarantined, customer QA notified, logger data secured.",
       severity: "Critical", createdBy: "T. Schmidt", reportDate: addDays(T, -22),
-      departmentBU: "BU Life Science", region: "Western Europe", alreadyInContact: "Yes",
+      departmentBU: "BU Life Science", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Quality", issueOrigin: "Internal Finding",
       taskOwner: "M. Dubois", dueDate: addDays(T, -8),
       followUp: "Escalated to BU lead. Awaiting carrier corrective measures.",
@@ -164,7 +164,7 @@ function seed() {
       description: "Audit sampling found CMR documents archived under inconsistent naming, slowing retrieval during the customer audit.",
       immediateAction: "—",
       severity: "Medium", createdBy: "Internal Audit", reportDate: addDays(T, -40),
-      departmentBU: "tmCT MEX/NLU", region: "Americas", alreadyInContact: "Yes",
+      departmentBU: "tmCT MEX/NLU", region: "Americas (Miami)", alreadyInContact: "Yes",
       deviationType: "Documentation", issueOrigin: "Internal Finding",
       taskOwner: "P. Nguyen", dueDate: addDays(T, -10),
       followUp: "Owner assigned. No update received yet — reminder cadence active.",
@@ -178,7 +178,7 @@ function seed() {
       description: "Installed gate width deviates from the approved technical drawing by 12cm, blocking forklift access on one side.",
       immediateAction: "Access rerouted; contractor notified to provide as-built evidence.",
       severity: "High", createdBy: "L. Rossi", reportDate: addDays(T, -10),
-      departmentBU: "Network & Products", region: "Western Europe", alreadyInContact: "Yes",
+      departmentBU: "Network & Products", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Equipment", issueOrigin: "Internal Finding",
       taskOwner: "L. Rossi", dueDate: addDays(T, 2),
       rootCause: "Contractor used a superseded drawing revision; revision control not enforced on site.",
@@ -197,7 +197,7 @@ function seed() {
       description: "Same customs data entered twice in two systems at PVG, raising error risk. Improvement blocked pending IT integration roadmap.",
       immediateAction: "—",
       severity: "Low", createdBy: "S. Tanaka", reportDate: addDays(T, -30),
-      departmentBU: "tmCT PVG", region: "China", alreadyInContact: "No",
+      departmentBU: "tmCT PVG", region: "China (Shanghai)", alreadyInContact: "No",
       deviationType: "System", issueOrigin: "Internal Finding",
       taskOwner: "S. Tanaka", dueDate: addDays(T, 25),
       followUp: "On hold until IT integration window opens in next quarter.",
@@ -213,7 +213,7 @@ function seed() {
       description: "High-security transport briefing checklist lacks a driver signature field, weakening evidence of acknowledgement.",
       immediateAction: "Interim manual sign-off added.",
       severity: "Medium", createdBy: "J. Becker", reportDate: addDays(T, -8),
-      departmentBU: "BU Diplo & High Security", region: "Germany", alreadyInContact: "Yes",
+      departmentBU: "BU Diplo & High Security", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Documentation", issueOrigin: "Internal Finding",
       taskOwner: "J. Becker", dueDate: addDays(T, 20),
       progressLog: [
@@ -228,7 +228,7 @@ function seed() {
       description: "Two weekly forklift inspection logs were missing for the Aftermarket warehouse.",
       immediateAction: "Forklifts re-inspected before further use.",
       severity: "Medium", createdBy: "Internal Audit", reportDate: addDays(T, -55),
-      departmentBU: "BU Aftermarket", region: "Germany", alreadyInContact: "Yes",
+      departmentBU: "BU Aftermarket", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Safety", issueOrigin: "Internal Finding",
       taskOwner: "A. Keller", dueDate: addDays(T, -25),
       rootCause: "Inspection reminders relied on one person's calendar; no backup when on leave.",
@@ -249,7 +249,7 @@ function seed() {
       description: "Returns desk signage was German-only; international staff requested multilingual labels.",
       immediateAction: "—",
       severity: "Low", createdBy: "R. Okafor", reportDate: addDays(T, -48),
-      departmentBU: "tmCT FRA", region: "Germany", alreadyInContact: "No",
+      departmentBU: "tmCT FRA", region: "Western Europe (Amsterdam)", alreadyInContact: "No",
       deviationType: "Communication", issueOrigin: "Internal Finding",
       taskOwner: "R. Okafor", dueDate: addDays(T, -12),
       implementationDate: addDays(T, -14), closedDate: addDays(T, -10), closedAt: `${addDays(T, -10)}T11:20:00`,
@@ -264,7 +264,7 @@ function seed() {
       description: "Reported via Q-Star but not a quality/process issue — facilities matter.",
       immediateAction: "—",
       severity: "Low", createdBy: "Anonymous", reportDate: addDays(T, -6),
-      departmentBU: "Human Resources", region: "Head Office", alreadyInContact: "No",
+      departmentBU: "Human Resources", region: "Head Office (Neu-Isenburg)", alreadyInContact: "No",
       deviationType: "Process", issueOrigin: "Internal Finding",
       taskOwner: "", dueDate: "",
       followUp: "Out of scope for QM. Redirected to Facilities. Declined.",
@@ -277,7 +277,7 @@ function seed() {
       description: "Three temperature data loggers in use past their calibration due date.",
       immediateAction: "Affected loggers pulled from service; spares deployed.",
       severity: "High", createdBy: "C. Gems", reportDate: addDays(T, -70),
-      departmentBU: "Quality", region: "Western Europe", alreadyInContact: "Yes",
+      departmentBU: "Quality", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Equipment", issueOrigin: "Internal Finding",
       taskOwner: "C. Gems", dueDate: addDays(T, -40),
       rootCause: "Calibration tracker not linked to procurement; renewals slipped.",
@@ -297,7 +297,7 @@ function seed() {
       description: "DG declarations were attached to the wrong consignments twice in one week, risking non-compliant carriage.",
       immediateAction: "Affected consignments held and re-documented; DG desk double-check enforced.",
       severity: "Critical", createdBy: "Internal Audit", reportDate: addDays(T, -120),
-      departmentBU: "tmCT MUC", region: "Germany", alreadyInContact: "Yes",
+      departmentBU: "tmCT MUC", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
       deviationType: "Compliance", issueOrigin: "Internal Finding",
       taskOwner: "J. Becker", dueDate: addDays(T, -80),
       rootCause: "DG paperwork matched to consignments by hand at a shared desk with no barcode confirmation.",
