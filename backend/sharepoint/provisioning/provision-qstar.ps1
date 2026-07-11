@@ -25,6 +25,7 @@ param(
   [Parameter(Mandatory=$true)][string]$ClientId,
   [string]$IssuesList   = "Q-Star Issues",
   [string]$ProgressList = "Q-Star Progress Log",
+  [string]$ConfigList   = "Q-Star Config",
   [switch]$PersonAsText
 )
 
@@ -137,6 +138,12 @@ Ensure-Field -List $IssuesList -Display "Effectiveness Check"    -Internal "Effe
 Ensure-Field -List $IssuesList -Display "Verified By"            -Internal "VerifiedBy"        -Type Person
 Ensure-Field -List $IssuesList -Display "Verified Date"          -Internal "VerifiedDate"      -Type DateTime -DateOnly
 Ensure-Field -List $IssuesList -Display "Closed Date"           -Internal "ClosedDate"        -Type DateTime -DateOnly
+Ensure-Field -List $IssuesList -Display "Closed At"             -Internal "ClosedAt"          -Type DateTime
+Ensure-Field -List $IssuesList -Display "Hold Reason"           -Internal "HoldReason"        -Type Note
+Ensure-Field -List $IssuesList -Display "Hold Until"            -Internal "HoldUntil"         -Type DateTime -DateOnly
+Ensure-Field -List $IssuesList -Display "Owner Update"          -Internal "OwnerUpdate"       -Type Choice -Choices $YESNO -Default "No"
+Ensure-Field -List $IssuesList -Display "Owner Update At"       -Internal "OwnerUpdateAt"     -Type DateTime
+Ensure-Field -List $IssuesList -Display "Owner Update Text"     -Internal "OwnerUpdateText"   -Type Note
 
 # Make sure Status has the new "Under Testing/Revision" value even if the list pre-existed
 try { Set-PnPField -List $IssuesList -Identity "Status" -Values @{ Choices = [string[]]$STATUS } | Out-Null }
@@ -152,6 +159,13 @@ Ensure-Field -List $ProgressList -Display "Author"         -Internal "Author"   
 Ensure-Field -List $ProgressList -Display "Entry Date"     -Internal "EntryDate"    -Type DateTime -AddToView
 Ensure-Field -List $ProgressList -Display "Text"           -Internal "EntryText"    -Type Note     -Required
 Write-Host "  (enforce append-only by only ever creating items in this list — never edit them)" -ForegroundColor DarkGray
+
+# =====================================================================
+#  Q-Star Config (single-item settings store for the IT-settings tab)
+# =====================================================================
+Write-Host "`n--- $ConfigList ---" -ForegroundColor Cyan
+Ensure-List -Title $ConfigList
+Ensure-Field -List $ConfigList -Display "Settings JSON" -Internal "SettingsJson" -Type Note
 
 Write-Host "`nDone. Lists provisioned on $SiteUrl." -ForegroundColor Green
 Write-Host "Next: point the app's Graph data layer at these lists, then build the intake + reminder flows."

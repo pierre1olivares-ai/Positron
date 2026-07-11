@@ -1,0 +1,69 @@
+@import '~@fluentui/react/dist/sass/References.scss';
+
+.qstarIssueManager {
+  overflow: hidden;
+  padding: 1em;
+  color: "[theme:bodyText, default: #323130]";
+  color: var(--bodyText);
+  &.teams {
+    font-family: $ms-font-family-fallbacks;
+  }
+}
+
+.welcome {
+  text-align: center;
+}
+
+.welcomeImage {
+  width: 100%;
+  max-width: 420px;
+}
+
+.links {
+  a {
+    text-decoration: none;
+    color: "[theme:link, default:#03787c]";
+    color: var(--link); // note: CSS Custom Properties support is limited to modern browsers only
+
+    &:hover {
+      text-decoration: underline;
+      color: "[theme:linkHovered, default: #014446]";
+      color: var(--linkHovered); // note: CSS Custom Properties support is limited to modern browsers only
+    }
+  }
+}
+
+.diagnostics {
+  margin-top: 1.5em;
+  padding: 1em;
+  border: 1px solid #e1dfdd;
+  border-radius: 4px;
+}
+
+.diagnosticList {
+  list-style: none;
+  margin: 0.75em 0 0;
+  padding: 0;
+
+  li {
+    padding: 0.35em 0;
+    font-size: 13px;
+  }
+}
+
+.diagnostic_pass {
+  color: #107c10;
+}
+
+.diagnostic_warn {
+  color: #797673;
+}
+
+.diagnostic_fail {
+  color: #a4262c;
+  font-weight: 600;
+}
+
+.diagnosticFail {
+  color: #a4262c;
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
+  "solution": {
+    "name": "qstar-issue-manager-client-side-solution",
+    "id": "217dac20-ed1b-472d-847f-e877fe881e44",
+    "version": "1.0.0.0",
+    "includeClientSideAssets": true,
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "developer": {
+      "name": "",
+      "websiteUrl": "",
+      "privacyUrl": "",
+      "termsOfUseUrl": "",
+      "mpnId": "Undefined-1.20.0"
+    },
+    "metadata": {
+      "shortDescription": {
+        "default": "qstar-issue-manager description"
+      },
+      "longDescription": {
+        "default": "qstar-issue-manager description"
+      },
+      "screenshotPaths": [],
+      "videoUrl": "",
+      "categories": []
+    },
+    "features": [
+      {
+        "title": "qstar-issue-manager Feature",
+        "description": "The feature that activates elements of the qstar-issue-manager solution.",
+        "id": "b4edf6b9-f1c6-4cdb-bf45-7dd7f3c10fde",
+        "version": "1.0.0.0"
+      }
+    ]
+  },
+  "paths": {
+    "zippedPackage": "solution/qstar-issue-manager.sppkg"
+  }
+}

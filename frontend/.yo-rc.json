@@ -1,0 +1,25 @@
+{
+  "@microsoft/generator-sharepoint": {
+    "whichFolder": "subdir",
+    "solutionName": "qstar-issue-manager",
+    "environment": "spo",
+    "packageManager": "npm",
+    "skipFeatureDeployment": true,
+    "componentType": "webpart",
+    "template": "react",
+    "componentName": "QstarIssueManager",
+    "componentDescription": "Q-Star Issue Manager - ISO 9001 quality issue tracker",
+    "plusBeta": false,
+    "isCreatingSolution": true,
+    "nodeVersion": "18.20.8",
+    "sdksVersions": {
+      "@microsoft/microsoft-graph-client": "3.0.2",
+      "@microsoft/teams-js": "2.24.0"
+    },
+    "version": "1.20.0",
+    "libraryName": "qstar-issue-manager",
+    "libraryId": "217dac20-ed1b-472d-847f-e877fe881e44",
+    "solutionShortDescription": "qstar-issue-manager description",
+    "isDomainIsolated": false
+  }
+}

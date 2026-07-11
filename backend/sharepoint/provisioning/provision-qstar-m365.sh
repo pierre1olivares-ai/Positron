@@ -19,6 +19,7 @@ set -euo pipefail
 SITE="${SITE:?Set SITE to your site URL, e.g. https://contoso.sharepoint.com/sites/Quality}"
 ISSUES="${ISSUES:-Q-Star Issues}"
 PROGRESS="${PROGRESS:-Q-Star Progress Log}"
+CONFIG="${CONFIG:-Q-Star Config}"
 PERSON_AS_TEXT="${PERSON_AS_TEXT:-0}"
 
 xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
@@ -132,6 +133,12 @@ f_note     "$ISSUES" "EffectivenessCheck" "Effectiveness Check"     0
 f_person   "$ISSUES" "VerifiedBy"         "Verified By"             0
 f_dateonly "$ISSUES" "VerifiedDate"       "Verified Date"           0
 f_dateonly "$ISSUES" "ClosedDate"         "Closed Date"             0
+f_datetime "$ISSUES" "ClosedAt"          "Closed At"               0
+f_note     "$ISSUES" "HoldReason"        "Hold Reason"             0
+f_dateonly "$ISSUES" "HoldUntil"         "Hold Until"              0
+f_choice   "$ISSUES" "OwnerUpdate"       "Owner Update"            "$YESNO_XML" 0 "No"
+f_datetime "$ISSUES" "OwnerUpdateAt"     "Owner Update At"         0
+f_note     "$ISSUES" "OwnerUpdateText"  "Owner Update Text"       0
 
 echo "  NOTE: index Status, Triaged and DueDate (List settings > Indexed columns) for the reminder flow."
 
@@ -145,5 +152,12 @@ f_person   "$PROGRESS" "Author"       "Author"         1
 f_datetime "$PROGRESS" "EntryDate"    "Entry Date"     1
 f_note     "$PROGRESS" "EntryText"    "Text"           0 TRUE
 echo "  (append-only: only ever create items in this list — never edit)"
+
+# =====================================================================
+#  Q-Star Config (single-item settings store for the IT-settings tab)
+# =====================================================================
+echo "--- $CONFIG ---"
+ensure_list "$CONFIG"
+f_note     "$CONFIG" "SettingsJson" "Settings JSON" 0
 
 echo "Done."

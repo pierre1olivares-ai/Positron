@@ -82,6 +82,14 @@ These back the owner-assignment, escalation, §10.2 corrective-action and NC eff
 | `verifiedBy` | Verified By | `VerifiedBy` | Person | NC only. Required before closing. |
 | `verifiedDate` | Verified Date | `VerifiedDate` | Date | NC only. |
 | `closedDate` | Closed Date | `ClosedDate` | Date | Stamped when status moves to Closed. |
+| `closedAt` | Closed At | `ClosedAt` | DateTime | Full timestamp companion to `closedDate` (the app shows time-of-day when available). |
+| `holdReason` | Hold Reason | `HoldReason` | Multiline (plain) | Set when status moves to On Hold. |
+| `holdUntil` | Hold Until | `HoldUntil` | Date | Resume date; drives the "resumes in N days" reminder. |
+| `ownerUpdate` | Owner Update | `OwnerUpdate` | Choice (Yes/No) | Default `No`. Set `Yes` when the Task Owner posts a comment or changes status, to flag the QM. |
+| `ownerUpdateAt` | Owner Update At | `OwnerUpdateAt` | DateTime | Timestamp of the owner's last flagged update. |
+| `ownerUpdateText` | Owner Update Text | `OwnerUpdateText` | Multiline (plain) | Short description of what the owner did (e.g. "Status changed from X to Y"). |
+
+> These six columns (`ClosedAt`, `HoldReason`, `HoldUntil`, `OwnerUpdate`, `OwnerUpdateAt`, `OwnerUpdateText`) were missing from an earlier revision of this document — they exist in the test build's data model (`STORAGE_KEY = "qstar:issues:v2"`) and are now included in both provisioning scripts.
 
 ### 2.4 Status choice — add the new value
 
@@ -129,9 +137,22 @@ For reference when creating the choice columns (and when validating in the form/
 
 ---
 
-## 4. Microsoft Graph data layer
+## 4. Data layer — implemented as SharePoint REST (PnPjs), not Graph
 
-This replaces the app's `window.storage` calls. In the test build, the whole register lives under the storage key `qstar:issues:v1` and settings under `qstar:settings:v1`. In production, each issue is a SharePoint list item and you swap the storage module for a thin Graph client.
+This replaces the app's `window.storage` calls. In the test build, the whole register lives under the storage key `qstar:issues:v2` and settings under `qstar:settings:v1`. In production, each issue is a SharePoint list item.
+
+**Implementation note:** the web part runs *inside* the same SharePoint site as the lists (per the "single dedicated site" constraint), so the actual code (`frontend/src/webparts/qstarIssueManager/services/SharePointDataService.ts`) uses **SharePoint REST via PnPjs** (`@pnp/sp` with the `SPFx` behavior) instead of Microsoft Graph. This means:
+
+- No Entra app registration, no admin consent, no `Sites.Selected` grant — the signed-in user's existing SharePoint permissions on the site are all that's needed.
+- Same-tenant, same-site REST calls work out of the box; this is *more* least-privilege than the Graph approach below, not less.
+- Person columns (`ReportedBy`, `TaskOwner`, `VerifiedBy`) are implemented as **text + companion `*Email` text columns** (the `-PersonAsText` / `PERSON_AS_TEXT=1` provisioning option), matching the test build's plain-string model exactly and avoiding the person-lookup dance in §4.3.
+- Settings (the IT-settings tab) are stored as one JSON blob in a single-item list, **`Q-Star Config`** (column `SettingsJson`), provisioned by both scripts.
+
+The Graph-based design below (§4.1–§4.6) is kept for reference in case the web part ever needs to reach a list on a *different* site than where it's hosted — that's the one scenario where Graph's cross-site reach earns its extra complexity.
+
+### Connection diagnostics
+
+`frontend/src/webparts/qstarIssueManager/services/ConnectionDiagnosticsService.ts` runs a live self-test from inside the web part: site access, current-user resolution, both lists exist with all expected columns, the `Under Testing/Revision` status choice is present, `Status`/`Triaged`/`DueDate` are indexed, and a full create → update → delete round-trip on a throwaway item. Surface this behind a button in the Admin/IT-settings tab so whoever deploys the web part in the real tenant can self-verify the connection without needing a developer to re-test it — this is the intended way to confirm "it works" against your actual SharePoint environment, since no external tool can authenticate as your tenant's users.
 
 ### 4.1 App registration (Entra ID)
 
@@ -274,13 +295,14 @@ Separately, a second flow handles intake: trigger **When a new response is submi
 
 ## 6. Replication checklist
 
-1. Create the `Q-Star Issues` list; add the new columns (§2.3) and the `Under Testing/Revision` status value (§2.4). Index `Status`, `Triaged`, `DueDate`.
-2. Create the `Q-Star Progress Log` child list (§2.5) and, if used, the config list (§4.7).
-3. Register the Entra SPA app; grant `Sites.Selected` on the Quality site (§4.5); create the three profile groups (§4.6).
-4. Swap the app's `window.storage` module for a Graph client implementing load / create / patch / progress-append against the list (§4.3). Keep the same object shapes so the components are untouched.
-5. Wire the IT-settings tab values to runtime config; surface the MS Form URL to reporters (already done in the app).
-6. Build the **intake flow** (§5.6) and the **daily reminder flow** (§5.4) reproducing rules 1–7, including the under-test branch (§5.3) and dedupe (§5.5).
-7. Verify against the seeded scenarios: an overdue task (rules 3–5), an NC mid-test (rule 6), and an NC whose test window has elapsed (rule 7, then QM verify-and-close unlocks).
+1. Run `backend/sharepoint/provisioning/provision-qstar.ps1` (or the `.sh` CLI equivalent) with `-PersonAsText` against your Quality site. This creates `Q-Star Issues` (with the new columns from §2.3 and the `Under Testing/Revision` status value), `Q-Star Progress Log`, and `Q-Star Config`, and indexes `Status`, `Triaged`, `DueDate`.
+2. ~~Register the Entra SPA app; grant `Sites.Selected`~~ — not needed with the implemented REST/PnPjs approach (§4). Only relevant if you later switch to Graph for a cross-site scenario.
+3. ~~Swap the app's `window.storage` module for a Graph client~~ — done: `SharePointDataService.ts` implements load / create / update / progress-append against the lists via PnPjs. Component logic still needs to be ported from the prototype to actually call it (see `frontend/README.md`).
+4. Deploy the web part to a page in the tenant (or run `gulp serve` against the tenant's SharePoint Workbench) and run the **connection diagnostics** (above) to self-verify site access, schema, and a write round-trip before doing anything else.
+5. Wire the IT-settings tab values to `Q-Star Config`; surface the MS Form URL to reporters (already done in the app).
+6. Resolve the four roles from Entra security groups (§4.6) — the app's role switcher is currently a front-end simulation.
+7. Build the **intake flow** (§5.6) and the **daily reminder flow** (§5.4) reproducing rules 1–7, including the under-test branch (§5.3) and dedupe (§5.5). These run as Power Automate cloud flows and can't be tested from inside the web part — see `backend/sharepoint/connection-test-plan.md` for the manual verification steps.
+8. Verify against the seeded scenarios: an overdue task (rules 3–5), an NC mid-test (rule 6), and an NC whose test window has elapsed (rule 7, then QM verify-and-close unlocks).
 
 ---
 
