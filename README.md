@@ -5,6 +5,17 @@ Quality-issue management tool for time:matters (Lufthansa Cargo group), built ar
 See [CLAUDE.md](CLAUDE.md) for full project context, domain notes, and next steps.
 
 ## Repo structure
-- `src/` — prototype React app (`qstar-issue-manager.jsx`), starting point for the SPFx web part.
-- `docs/` — clickable preview (`qstar-live.html`), SharePoint/Graph integration design, Power Automate flow docs, and the implementation checklist.
-- `scripts/` — provisioning scripts for the SharePoint List columns (PowerShell + bash/M365 CLI variants).
+
+```
+frontend/   SPFx web part (React) — UI layer. See frontend/README.md.
+backend/    SharePoint List + Graph + Power Automate — data/automation layer. See backend/README.md.
+docs/       Cross-cutting project docs (rollout/implementation checklist).
+```
+
+- **`frontend/`** — the web part users interact with. `frontend/prototype/` holds the current validated React prototype and its clickable demo; this becomes the real SPFx solution once scaffolded.
+- **`backend/`** — no custom server; the SharePoint List is the data store, Microsoft Graph is the API, Power Automate handles intake/reminders. See `backend/sharepoint/` and `backend/power-automate/`.
+- **`docs/`** — the non-developer rollout plan and IT ask list (`qstar-implementation-checklist.md`).
+
+## Local development
+
+The frontend is not yet scaffolded as a runnable project (see [frontend/README.md](frontend/README.md) for the exact steps once Node.js and the SPFx toolchain are installed). Until then, `frontend/prototype/qstar-live.html` can be opened directly in a browser to demo the current UI.

@@ -6,9 +6,10 @@ This file primes Claude Code to continue a project that began in a Claude chat. 
 A quality‑issue management tool for **time:matters** (logistics; Lufthansa Cargo group), built around **ISO 9001:2015**. It covers the full lifecycle: report → triage → assign → progress → on‑hold → (for non‑conformities) a 2‑month effectiveness test → close → re‑open. It has a dashboard, an issue register, role‑based access, and email reminders.
 
 ## Current state
-- A **working prototype** exists as a **single‑file React app**: [`src/qstar-issue-manager.jsx`](src/qstar-issue-manager.jsx). It currently persists to an injected `window.storage` shim (browser localStorage in the standalone build).
-- A **self‑contained preview** exists: [`docs/qstar-live.html`](docs/qstar-live.html) (React + Recharts + Lucide bundled; Tailwind via a public CDN — see constraint below).
+- A **working prototype** exists as a **single‑file React app**: [`frontend/prototype/qstar-issue-manager.jsx`](frontend/prototype/qstar-issue-manager.jsx). It currently persists to an injected `window.storage` shim (browser localStorage in the standalone build).
+- A **self‑contained preview** exists: [`frontend/prototype/qstar-live.html`](frontend/prototype/qstar-live.html) (React + Recharts + Lucide bundled; Tailwind via a public CDN — see constraint below).
 - The prototype is feature‑complete for review and has been validated with the Quality team.
+- The repo is split into `frontend/` (SPFx web part, currently just the prototype) and `backend/` (SharePoint List + Graph + Power Automate — see `backend/README.md`). The SPFx solution itself has not been scaffolded yet (Node/SPFx toolchain not installed on the dev machine as of this writing).
 
 ## The goal now: productionize into Microsoft 365 / SharePoint
 Turn the prototype into a maintainable, deployed tool:
@@ -32,21 +33,22 @@ Turn the prototype into a maintainable, deployed tool:
 - Brand: navy `#1B205C` ("Space Cadet") + yellow `#FBB900` (Selective Yellow).
 
 ## Repo structure
-- `src/qstar-issue-manager.jsx` — the full prototype app (the starting code; will become the SPFx web part source).
-- `docs/qstar-live.html` — clickable preview for demos/requirements.
-- `docs/qstar-sharepoint-graph-integration.md` — SharePoint List column map + the read/write data layer design.
-- `scripts/provision-qstar.ps1` / `scripts/provision-qstar-m365.sh` — scripts that create the List columns.
-- `docs/qstar-power-automate-flows.md` — step‑by‑step build of the intake + reminder flows.
+- `frontend/prototype/qstar-issue-manager.jsx` — the full prototype app (the starting code; will become the SPFx web part source).
+- `frontend/prototype/qstar-live.html` — clickable preview for demos/requirements.
+- `backend/sharepoint/qstar-sharepoint-graph-integration.md` — SharePoint List column map + the read/write data layer design.
+- `backend/sharepoint/provisioning/provision-qstar.ps1` / `provision-qstar-m365.sh` — scripts that create the List columns.
+- `backend/power-automate/qstar-power-automate-flows.md` — step‑by‑step build of the intake + reminder flows.
 - `docs/qstar-implementation-checklist.md` — the non‑developer rollout plan and IT ask list (governance, security, sequence).
 
 ## Suggested next steps (for Claude Code)
 1. ~~Initialise the repo and commit the current files.~~ Done.
-2. Scaffold an **SPFx web part** solution (Yeoman/`@microsoft/generator-sharepoint`), Node LTS.
-3. Port the React component from `src/qstar-issue-manager.jsx` into the web part.
-4. Implement the SharePoint List data layer per `docs/qstar-sharepoint-graph-integration.md` (replace `window.storage`).
-5. Remove the Tailwind CDN; bundle styling locally.
-6. Wire role resolution to Entra groups.
-7. Confirm the Power Automate flows against the provisioned List.
-8. Build, test in a dev site, then follow `docs/qstar-implementation-checklist.md` for deployment.
+2. ~~Split the repo into `frontend/` / `backend/`.~~ Done.
+3. Scaffold an **SPFx web part** solution (Yeoman/`@microsoft/generator-sharepoint`) inside `frontend/` once Node LTS is installed — see `frontend/README.md`.
+4. Port the React component from `frontend/prototype/qstar-issue-manager.jsx` into the scaffolded web part.
+5. Implement the SharePoint List data layer per `backend/sharepoint/qstar-sharepoint-graph-integration.md` (replace `window.storage`).
+6. Remove the Tailwind CDN; bundle styling locally.
+7. Wire role resolution to Entra groups.
+8. Confirm the Power Automate flows against the provisioned List.
+9. Build, test in a dev site, then follow `docs/qstar-implementation-checklist.md` for deployment.
 
 > Ask me (Claude Code) to start with any step — e.g. "scaffold the SPFx solution and port the component," or "build the SharePoint List data layer to replace window.storage."
