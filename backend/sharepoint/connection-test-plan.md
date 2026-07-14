@@ -4,7 +4,7 @@ This is a manual verification checklist for confirming the Q-Star system works e
 
 ## 0. Prerequisites
 
-- [ ] `backend/sharepoint/provisioning/provision-qstar.ps1` (or `provision-qstar-m365.sh`) has been run against your Quality site, with `-PersonAsText` (or `PERSON_AS_TEXT=1`).
+- [ ] The appropriate native-Person provisioning profile has been run against the site: `provision-qstar-beta.ps1` / `provision-qstar-beta-m365.sh` for beta, or the production equivalents when role groups are required.
 - [ ] The web part builds locally (`cd frontend && npm install && npx gulp bundle`) with no errors.
 - [ ] You have edit access to the Quality site to add the web part to a test page.
 

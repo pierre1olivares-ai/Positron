@@ -23,6 +23,8 @@ export type YesNo = "Yes" | "No";
 export interface IProgressLogEntry {
   ts: string;
   author: string;
+  authorId?: number;
+  authorEmail?: string;
   text: string;
 }
 
@@ -39,6 +41,8 @@ export interface IIssue {
   immediateAction: string;
   severity: Severity;
   createdBy: string;
+  createdById?: number;
+  createdByEmail?: string;
   reportDate: string;
   departmentBU: string;
   region: string;
@@ -49,6 +53,8 @@ export interface IIssue {
 
   followUp: string;
   taskOwner: string;
+  taskOwnerId?: number;
+  taskOwnerEmail?: string;
   ownerBU: string;
   dueDate: string;
 
@@ -57,6 +63,8 @@ export interface IIssue {
   implementationDate: string;
   effectivenessCheck: string;
   verifiedBy: string;
+  verifiedById?: number;
+  verifiedByEmail?: string;
   verifiedDate: string;
   closedDate: string;
   closedAt: string;

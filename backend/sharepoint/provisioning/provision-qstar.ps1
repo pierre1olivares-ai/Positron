@@ -1,10 +1,10 @@
 <#
 =====================================================================
- Q-Star Issue Manager — SharePoint provisioning (PnP PowerShell)
+ Q-Star Issue Manager — production provisioning (PnP PowerShell)
 =====================================================================
- Creates the "Q-Star Issues" list and the "Q-Star Progress Log" child
- list with every column, internal name, choice value and index used by
- the Q-Star Issue Manager app. Idempotent: existing items are skipped.
+ Creates the Q-Star lists with every column, internal name, choice value
+ and index used by the app, plus the four production role groups and their
+ site permissions. Use provision-qstar-beta.ps1 for a beta without groups.
 
  PREREQUISITES
    1. Install the module:      Install-Module PnP.PowerShell -Scope CurrentUser
@@ -26,7 +26,8 @@ param(
   [string]$IssuesList   = "Q-Star Issues",
   [string]$ProgressList = "Q-Star Progress Log",
   [string]$ConfigList   = "Q-Star Config",
-  [switch]$PersonAsText
+  [switch]$PersonAsText,
+  [switch]$SkipRoleGroups
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +43,8 @@ $YESNO      = "Yes","No"
 $BU = @(
   "BU Aftermarket","BU Airlines","BU Automotive","BU Diplo & High Security",
   "BU High Tech & SemiCon","BU Life Science","Central Europe & Commercial Services",
+  "Claims & Complaints","Customer Solution & Business Development",
+  "Digital Transformation & Data Management","Finance & Controlling","Human Resources",
   "IT","Legal & Data Protection","Marketing","Network & Products","Quality",
   "Risk Management","Strategy & Transformation","tmCT FRA","tmCT MUC","tmCT MEX/NLU","tmCT PVG"
 )  # extend to the full set used on your live form
@@ -49,6 +52,30 @@ $BU = @(
 # ---------- Connect ----------
 Write-Host "Connecting to $SiteUrl ..." -ForegroundColor Cyan
 Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
+
+# ---------- Role groups ----------
+function Ensure-RoleGroup {
+  param([string]$Name,[string]$Description,[string]$Role)
+  $group = Get-PnPGroup -Identity $Name -ErrorAction SilentlyContinue
+  if (-not $group) {
+    $group = New-PnPGroup -Title $Name -Description $Description
+    Write-Host "+ group '$Name'" -ForegroundColor Green
+  } else {
+    Write-Host "= group '$Name' exists" -ForegroundColor DarkGray
+  }
+  try { Set-PnPGroupPermissions -Identity $Name -AddRole $Role | Out-Null }
+  catch { Write-Host "  = permission '$Role' exists/skip" -ForegroundColor DarkGray }
+}
+
+if (-not $SkipRoleGroups) {
+  Write-Host "`n--- Q-Star role groups ---" -ForegroundColor Cyan
+  Ensure-RoleGroup -Name "Q-Star Admins" -Description "Q-Star application administrators" -Role "Full Control"
+  Ensure-RoleGroup -Name "Q-Star Quality Managers" -Description "Q-Star Quality Managers" -Role "Edit"
+  Ensure-RoleGroup -Name "Q-Star Task Owners" -Description "Q-Star task owners" -Role "Read"
+  Ensure-RoleGroup -Name "Q-Star Readers" -Description "Q-Star read-only users" -Role "Read"
+} else {
+  Write-Host "`n--- Q-Star role groups skipped by beta entry point ---" -ForegroundColor Yellow
+}
 
 # ---------- Helpers ----------
 function Ensure-List {
@@ -129,6 +156,7 @@ Ensure-Field -List $IssuesList -Display "Task Created"            -Internal "Tas
 # New fields (owner assignment, escalation, §10.2, NC effectiveness test)
 Ensure-Field -List $IssuesList -Display "Triaged"                -Internal "Triaged"           -Type Choice -Choices $YESNO -Default "No" -AddToView -Index
 Ensure-Field -List $IssuesList -Display "Task Owner"             -Internal "TaskOwner"         -Type Person -AddToView
+Ensure-Field -List $IssuesList -Display "Permissioned Owner Email" -Internal "PermissionedOwnerEmail" -Type Text
 Ensure-Field -List $IssuesList -Display "Escalation BU"          -Internal "EscalationBU"      -Type Choice -Choices $BU
 Ensure-Field -List $IssuesList -Display "Due Date"               -Internal "DueDate"           -Type DateTime -DateOnly -AddToView -Index
 Ensure-Field -List $IssuesList -Display "Root Cause"             -Internal "RootCause"         -Type Note
@@ -168,4 +196,10 @@ Ensure-List -Title $ConfigList
 Ensure-Field -List $ConfigList -Display "Settings JSON" -Internal "SettingsJson" -Type Note
 
 Write-Host "`nDone. Lists provisioned on $SiteUrl." -ForegroundColor Green
-Write-Host "Next: point the app's Graph data layer at these lists, then build the intake + reminder flows."
+if ($SkipRoleGroups) {
+  Write-Host "Beta profile complete: no Q-Star groups or role assignments were created." -ForegroundColor Yellow
+  Write-Host "Next: enable Beta access mode on the web part and use the site's existing Owners, Members, and Visitors."
+} else {
+  Write-Host "Production profile complete: four Q-Star role groups and site permissions were provisioned." -ForegroundColor Green
+  Write-Host "Next: add users or Entra groups to the Q-Star groups and configure the assignment-permission, intake, and reminder flows."
+}

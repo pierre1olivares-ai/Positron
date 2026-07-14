@@ -8,12 +8,15 @@ import "@pnp/sp/site-users/web";
 
 import {
   ISSUE_FIELDS,
-  PROGRESS_FIELDS,
   ISSUE_FIELD_NAMES,
   PROGRESS_FIELD_NAMES,
   DEFAULT_ISSUES_LIST,
   DEFAULT_PROGRESS_LIST,
 } from "./fieldMap";
+import {
+  buildDiagnosticIssuePayload,
+  buildDiagnosticProgressPayload,
+} from "./diagnosticPayload";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 
@@ -25,7 +28,6 @@ export interface ICheckResult {
 
 const REQUIRED_STATUS_CHOICE = "Under Testing/Revision";
 const RECOMMENDED_INDEXED_FIELDS = [ISSUE_FIELDS.status, ISSUE_FIELDS.triaged, ISSUE_FIELDS.dueDate];
-const TEST_MARKER = "Q-Star connection test — safe to delete";
 
 /**
  * Runs a battery of live checks against the SharePoint site/lists this web
@@ -192,29 +194,23 @@ export class ConnectionDiagnosticsService {
   /** Creates, updates, and deletes a throwaway item in both lists to prove write/delete permissions end-to-end. */
   private async checkRoundTrip(results: ICheckResult[]): Promise<void> {
     let issueId: number | undefined;
+    let progressId: number | undefined;
     try {
+      const currentUser = await this.sp.web.currentUser.select("Id")();
       const issues = this.sp.web.lists.getByTitle(this.issuesListName).items;
-      const created = await issues.add({
-        [ISSUE_FIELDS.shortSummary]: TEST_MARKER,
-        [ISSUE_FIELDS.qsNumber]: 0,
-        [ISSUE_FIELDS.severity]: "Low",
-        [ISSUE_FIELDS.triaged]: "No",
-        [ISSUE_FIELDS.taskCreated]: "No",
-      });
+      const created = await issues.add(buildDiagnosticIssuePayload());
       issueId = created.Id as number;
       const currentIssueId: number = issueId;
 
       await issues.getById(currentIssueId).update({ [ISSUE_FIELDS.followUp]: "diagnostic update" });
 
       const progress = this.sp.web.lists.getByTitle(this.progressListName).items;
-      const createdEntry = await progress.add({
-        [PROGRESS_FIELDS.parentItemId]: currentIssueId,
-        [PROGRESS_FIELDS.author]: "Q-Star Diagnostics",
-        [PROGRESS_FIELDS.entryDate]: new Date().toISOString(),
-        [PROGRESS_FIELDS.text]: TEST_MARKER,
-      });
-      await progress.getById(createdEntry.Id as number).delete();
+      const createdEntry = await progress.add(buildDiagnosticProgressPayload(currentIssueId, currentUser.Id));
+      progressId = createdEntry.Id as number;
+      await progress.getById(progressId).delete();
+      progressId = undefined;
       await issues.getById(currentIssueId).delete();
+      issueId = undefined;
 
       results.push({
         name: "Round-trip write test",
@@ -223,6 +219,17 @@ export class ConnectionDiagnosticsService {
       });
     } catch (e) {
       results.push({ name: "Round-trip write test", status: "fail", message: errorMessage(e) });
+      if (progressId !== undefined) {
+        try {
+          await this.sp.web.lists.getByTitle(this.progressListName).items.getById(progressId).delete();
+        } catch {
+          results.push({
+            name: "Round-trip progress cleanup",
+            status: "warn",
+            message: `Left behind a progress test item (Id ${progressId}) in "${this.progressListName}" — delete it manually.`,
+          });
+        }
+      }
       if (issueId !== undefined) {
         try {
           await this.sp.web.lists.getByTitle(this.issuesListName).items.getById(issueId).delete();
