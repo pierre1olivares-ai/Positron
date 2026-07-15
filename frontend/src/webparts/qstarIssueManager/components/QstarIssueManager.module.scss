@@ -2,12 +2,32 @@
 
 .qstarIssueManager {
   overflow: hidden;
-  padding: 1em;
+  padding: 0;
   color: "[theme:bodyText, default: #323130]";
   color: var(--bodyText);
   &.teams {
     font-family: $ms-font-family-fallbacks;
   }
+}
+
+.loading,
+.accessError {
+  margin: 1rem;
+  padding: 1rem;
+  border: 1px solid #e1dfdd;
+  border-radius: 8px;
+  background: #fff;
+  color: #323130;
+}
+
+.accessError {
+  border-color: #f1bbbc;
+  background: #fdf3f4;
+}
+
+.errorDetail {
+  color: #a4262c;
+  font-size: 12px;
 }
 
 .welcome {

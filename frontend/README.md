@@ -1,37 +1,65 @@
 # Frontend — Q-Star Issue Manager web part
 
-An SPFx (SharePoint Framework) web part, scaffolded with the Yeoman generator (`@microsoft/generator-sharepoint`, SPFx 1.20, React, Node 18 LTS).
+Production SPFx 1.20 / React 17 web part for the validated Q-Star Issue Manager.
 
-- `prototype/` — the original validated React prototype (`qstar-issue-manager.jsx`) and its clickable demo (`qstar-live.html`). Reference source: the component UI has not yet been ported into the web part below.
-- `src/webparts/qstarIssueManager/` — the actual SPFx web part.
-  - `components/` — the React component (currently the SPFx boilerplate plus a working **Connection Diagnostics** panel; the prototype's full UI still needs porting in).
-  - `models/` — `IIssue.ts` / `ISettings.ts`, typed 1:1 with the prototype's data shapes so porting doesn't require reshaping data.
-  - `services/` — the real data layer:
-    - `SharePointDataService.ts` — production implementation. Reads/writes the `Q-Star Issues` and `Q-Star Progress Log` lists via SharePoint REST (PnPjs), using the signed-in user's own session. No Entra app registration or Graph admin consent needed — see the rationale in [`../backend/sharepoint/qstar-sharepoint-graph-integration.md`](../backend/sharepoint/qstar-sharepoint-graph-integration.md#4-data-layer--implemented-as-sharepoint-rest-pnpjs-not-graph).
-    - `MockDataService.ts` — localStorage-backed fallback for UI work in the Workbench before a real list exists.
-    - `ConnectionDiagnosticsService.ts` — live self-test (site access, schema, choice values, indexes, a full write/delete round-trip). Wired to the **Run Connection Test** button in the web part.
-    - `fieldMap.ts` — single source of truth for SharePoint internal column names; keep in sync with the provisioning scripts.
+## Implemented
 
-## Running locally
+- The complete validated prototype UI is ported to `components/QstarPrototype.tsx` and uses `IDataService`; production no longer uses `window.storage`.
+- `SharePointDataService.ts` reads and writes the `Q-Star Issues`, `Q-Star Progress Log`, and `Q-Star Config` lists through same-site SharePoint REST/PnPjs under the signed-in user's session.
+- Native SharePoint Person fields are selected/expanded into stable IDs, display names, and email addresses and are written via `FieldNameId` lookup values.
+- Issues and progress logs are read with PnPjs page iteration instead of a silent 5,000-row cap.
+- `SharePointRoleResolver.ts` maps the current user's SharePoint groups to Admin, Quality Manager, Task Owner, or Reader. Resolution is fail-closed; only localhost gets the explicit Admin development override.
+- Connection Diagnostics validates access, schema, choices, indexes, and a required-field-safe create/update/delete round trip with cleanup for both Lists.
+- Recharts, Lucide, and generated Tailwind utilities are bundled in the `.sppkg`; production loads no Tailwind CDN.
+- Local development uses `MockDataService`; tenant builds use `SharePointDataService`.
+- Pure role, Person-value, field-map, and diagnostic-payload rules have an automated unit suite in `tests/`.
+
+The original source and standalone preview remain in `prototype/` as the requirements/reference baseline.
+
+## Requirements
+
+- Node.js `>=18.17.1 <19.0.0`
+- A trusted SPFx development certificate for `gulp serve`
+- For tenant testing: a provisioned Q-Star development site and the four Q-Star SharePoint groups
+
+## Install, test, and build
 
 ```bash
-npm install
-npx gulp serve   # opens the local Workbench; for a real-tenant test, append --nobrowser
-                  # and open https://<tenant>.sharepoint.com/_layouts/15/workbench.aspx yourself
-```
-
-To build/package without serving:
-
-```bash
+npm ci
+npm test
 npx gulp bundle --ship
-npx gulp package-solution --ship   # produces sharepoint/solution/qstar-issue-manager.sppkg
+npx gulp package-solution --ship
 ```
 
-The `.sppkg` is what gets uploaded to the tenant's App Catalog for a real deployment.
+`npm test` regenerates the locally bundled utility stylesheet, runs the unit suite, then runs SPFx lint, TypeScript, Sass, and webpack checks.
 
-## What's left
+The deployable package is:
 
-1. Port the prototype's UI (`prototype/qstar-issue-manager.jsx`) into `src/webparts/qstarIssueManager/components/QstarIssueManager.tsx`, replacing its `window.storage` calls with the `dataService` prop (already wired through from the web part).
-2. Remove the Tailwind CDN `<script>` tag present in the prototype — production bundles all styling locally (see the hard constraints in [`../CLAUDE.md`](../CLAUDE.md)). The scaffolded web part already uses SCSS modules, not Tailwind.
-3. Wire role resolution (Admin/QM/Owner/Reader) to Entra security groups instead of the prototype's in-app switcher.
-4. Before any of the above, provision the SharePoint lists (`backend/sharepoint/provisioning/`) and run through [`../backend/sharepoint/connection-test-plan.md`](../backend/sharepoint/connection-test-plan.md) — including the **Run Connection Test** button in this web part — to confirm the tenant connection works before building further on top of it.
+```text
+sharepoint/solution/qstar-issue-manager.sppkg
+```
+
+## Local development
+
+```bash
+npx gulp trust-dev-cert   # one-time; macOS may request an administrator password
+npx gulp serve --nobrowser
+```
+
+Then open the tenant SharePoint Workbench with the debug-manifest query printed by `gulp serve`. Localhost uses mock data and a clearly marked development Admin role.
+
+## Tenant work remaining
+
+1. Provision a dedicated development site with `backend/sharepoint/provisioning/`.
+2. For beta, leave group creation disabled and enable **Beta access mode** in the web part properties. Existing site Owners map to Admin, Members/editors to Quality Manager, and read-only visitors to Reader.
+3. Run Connection Diagnostics in the real tenant.
+4. Build the assignment-permission, intake, and reminder flows from `backend/power-automate/qstar-power-automate-flows.md`.
+5. Validate whether nested Entra groups are enumerated through SharePoint; add the documented `MSGraphClientV3` fallback only if required.
+6. Run the role/permission/UAT checklist before App Catalog production deployment.
+
+Use the explicitly named beta provisioning entry point for the pilot:
+
+- PowerShell: `provision-qstar-beta.ps1`
+- Microsoft 365 CLI: `provision-qstar-beta-m365.sh`
+
+The production entry points (`provision-qstar.ps1` and `provision-qstar-m365.sh`) create the lists plus all four Q-Star role groups and permissions.

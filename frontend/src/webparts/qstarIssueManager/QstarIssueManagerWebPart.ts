@@ -3,7 +3,8 @@ import * as ReactDom from 'react-dom';
 import { Version } from '@microsoft/sp-core-library';
 import {
   type IPropertyPaneConfiguration,
-  PropertyPaneTextField
+  PropertyPaneTextField,
+  PropertyPaneToggle
 } from '@microsoft/sp-property-pane';
 import { BaseClientSideWebPart } from '@microsoft/sp-webpart-base';
 import { IReadonlyTheme } from '@microsoft/sp-component-base';
@@ -14,12 +15,15 @@ import { IQstarIssueManagerProps } from './components/IQstarIssueManagerProps';
 import { SharePointDataService } from './services/SharePointDataService';
 import { ConnectionDiagnosticsService, ICheckResult } from './services/ConnectionDiagnosticsService';
 import { DEFAULT_ISSUES_LIST, DEFAULT_PROGRESS_LIST } from './services/fieldMap';
+import { DevelopmentRoleResolver, SharePointRoleResolver } from './services/SharePointRoleResolver';
+import { MockDataService } from './services/MockDataService';
 
 export interface IQstarIssueManagerWebPartProps {
   description: string;
   siteUrl: string;
   issuesListName: string;
   progressListName: string;
+  betaAccessMode: boolean;
 }
 
 export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQstarIssueManagerWebPartProps> {
@@ -32,8 +36,13 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
     const progressListName = this.properties.progressListName || DEFAULT_PROGRESS_LIST;
     const siteUrl = this.properties.siteUrl || undefined;
 
-    const dataService = new SharePointDataService(this.context, issuesListName, progressListName, siteUrl);
+    const dataService = this.context.isServedFromLocalhost
+      ? new MockDataService()
+      : new SharePointDataService(this.context, issuesListName, progressListName, siteUrl);
     const diagnostics = new ConnectionDiagnosticsService(this.context, issuesListName, progressListName, siteUrl);
+    const roleResolver = this.context.isServedFromLocalhost
+      ? new DevelopmentRoleResolver('admin')
+      : new SharePointRoleResolver(this.context, undefined, siteUrl, !!this.properties.betaAccessMode);
 
     const element: React.ReactElement<IQstarIssueManagerProps> = React.createElement(
       QstarIssueManager,
@@ -43,7 +52,9 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
         environmentMessage: this._environmentMessage,
         hasTeamsContext: !!this.context.sdks.microsoftTeams,
         userDisplayName: this.context.pageContext.user.displayName,
+        userEmail: this.context.pageContext.user.email,
         dataService,
+        roleResolver,
         runConnectionDiagnostics: (): Promise<ICheckResult[]> => diagnostics.run()
       }
     );
@@ -136,6 +147,11 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
                 PropertyPaneTextField('progressListName', {
                   label: 'Progress log list name',
                   value: DEFAULT_PROGRESS_LIST
+                }),
+                PropertyPaneToggle('betaAccessMode', {
+                  label: 'Beta access mode (use existing site permissions)',
+                  onText: 'Enabled',
+                  offText: 'Disabled'
                 })
               ]
             }

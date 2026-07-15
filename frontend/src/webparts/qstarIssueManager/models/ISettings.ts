@@ -1,4 +1,4 @@
-export type Role = "admin" | "qm" | "owner" | "reader";
+import { Role } from "./IRole";
 
 export interface IAccessEntry {
   email: string;
@@ -10,8 +10,6 @@ export interface ISettings {
   flowId: string;
   spSiteUrl: string;
   spListName: string;
-  tenantId: string;
-  clientId: string;
   connected: boolean;
   lastTested: string;
   access: IAccessEntry[];
@@ -22,8 +20,6 @@ export const DEFAULT_SETTINGS: ISettings = {
   flowId: "",
   spSiteUrl: "",
   spListName: "",
-  tenantId: "",
-  clientId: "",
   connected: false,
   lastTested: "",
   access: [],

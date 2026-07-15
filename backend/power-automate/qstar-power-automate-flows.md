@@ -1,9 +1,10 @@
 # Q-Star Issue Manager — Power Automate build guide
 
-Two flows complete the production system:
+Three flows complete the production system:
 
 - **Flow A — Intake:** copies each Q-Star Microsoft Form response into the `Q-Star Issues` list (Phase 1).
 - **Flow B — Daily reminders:** the scheduled engine that reproduces the app's `buildReminders()` logic — owner nudges, QM alerts, BU escalation, and the NC effectiveness-test reminders.
+- **Flow C — Assignment permissions:** reapplies item-level permissions whenever a Task Owner is assigned or changed.
 
 Build them in the [Power Automate designer](https://make.powerautomate.com) on the same environment/site as the list. Field names below are the internal names created by the provisioning scripts.
 
@@ -164,6 +165,44 @@ Open in Q-Star: https://<your-app-url>/?issue=@{items('Apply_to_each')?['ID']}
 
 ---
 
+## Flow C — Assignment permissions
+
+**Goal:** SharePoint—not React—enforces that Admins/QMs can edit every issue, Readers and unassigned Task Owners can read, and only the currently assigned Task Owner can edit that item.
+
+Use a dedicated flow connection owned by an approved Q-Star service account with Full Control on the site.
+
+1. Create an **Automated cloud flow** named `Q-Star — Assignment permissions` with SharePoint trigger **When an item is created or modified** on `Q-Star Issues`.
+2. Add a trigger condition so the flow runs when `TaskOwner` is populated. During testing, also record the last permissioned owner in a small text column such as `PermissionedOwnerEmail`; skip the flow when that value already equals the current Task Owner email. This prevents unnecessary permission churn.
+3. Resolve these principal IDs once with **Send an HTTP request to SharePoint** (`GET`):
+   - `/_api/web/sitegroups/getbyname('Q-Star Admins')?$select=Id`
+   - `/_api/web/sitegroups/getbyname('Q-Star Quality Managers')?$select=Id`
+   - `/_api/web/sitegroups/getbyname('Q-Star Task Owners')?$select=Id`
+   - `/_api/web/sitegroups/getbyname('Q-Star Readers')?$select=Id`
+4. Break inheritance on the current item and clear old assignments (`POST`):
+   ```text
+   /_api/web/lists/getbytitle('Q-Star Issues')/items(<ID>)/breakroleinheritance(copyRoleAssignments=false,clearSubscopes=true)
+   ```
+5. Add role assignments with `POST` requests to:
+   ```text
+   /_api/web/lists/getbytitle('Q-Star Issues')/items(<ID>)/roleassignments/addroleassignment(principalid=<PRINCIPAL_ID>,roledefid=<ROLE_ID>)
+   ```
+   Apply this matrix:
+
+   | Principal | Permission | Built-in role ID |
+   |---|---|---:|
+   | Q-Star Admins | Full Control | `1073741829` |
+   | Q-Star Quality Managers | Edit | `1073741830` |
+   | Q-Star Task Owners | Read | `1073741826` |
+   | Q-Star Readers | Read | `1073741826` |
+   | Current `TaskOwner/Id` | Edit | `1073741830` |
+
+6. Update `PermissionedOwnerEmail` to the current Task Owner email. If owner assignment is cleared, reapply only the four group permissions and leave no individual Edit grant.
+7. Configure failure alerts. A permissions-flow failure is a security-relevant operational event and must not be silently ignored.
+
+Breaking inheritance again with `clearSubscopes=true` removes the previous owner's direct grant, so reassignment revokes old access automatically. Monitor the number of unique permission scopes as the register grows; if the List approaches SharePoint governance limits, review the item-security design with the SharePoint administrator.
+
+---
+
 ## Testing checklist
 
 Use the seeded scenarios as your test fixtures (or replicate them as real items):
@@ -172,6 +211,8 @@ Use the seeded scenarios as your test fixtures (or replicate them as real items)
 2. **NC mid-test** (implemented ~5 weeks ago) → no overdue chasing; `NC_TEST_SOON` fires 7 days before the end date.
 3. **NC past test end** → `NC_TEST_DONE` fires for owner + QM; the app then unlocks *Verify & close*.
 4. Re-run the flow manually the same day → no duplicate emails (the Reminder Log blocks repeats).
+5. Assign an issue to Owner A → Owner A can edit it while another Task Owner can only read it.
+6. Reassign it to Owner B → Owner A immediately loses Edit and Owner B gains it; Admin/QM retain Edit throughout.
 
 **Tips:** while testing, temporarily point recipients at your own mailbox and shorten the recurrence to hourly; switch back before go-live. To validate date logic without waiting, set a test item's `DueDate`/`ImplementationDate` so the target day equals today. Turn on **Pagination** on every `Get items` action that could exceed 100 rows.
 
