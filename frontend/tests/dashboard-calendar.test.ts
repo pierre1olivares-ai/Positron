@@ -38,13 +38,15 @@ Module._load = originalLoad;
 const RealDate = Date;
 const originalTZ = process.env.TZ;
 let container: HTMLDivElement;
+let asOf: [number, number, number];
 
 beforeEach(() => {
   container = document.createElement("div");
   document.body.appendChild(container);
+  asOf = [2026, 3, 15];
   globalThis.Date = new Proxy(RealDate, {
-    construct: (target, args) => Reflect.construct(target, args.length ? args : [2026, 3, 15, 12]),
-    get: (target, key) => key === "now" ? () => new RealDate(2026, 3, 15, 12).getTime() : Reflect.get(target, key),
+    construct: (target, args) => Reflect.construct(target, args.length ? args : [...asOf, 12]),
+    get: (target, key) => key === "now" ? () => new RealDate(...asOf, 12).getTime() : Reflect.get(target, key),
   });
 });
 
@@ -110,6 +112,7 @@ for (const timezone of ["Europe/Amsterdam", "America/New_York"]) {
     assert.doesNotMatch(container.textContent || "", /Invalid Date/);
     const yearTotal = Array.from(container.querySelectorAll("div")).find(element => element.textContent === "2026 · YTD");
     assert.equal(yearTotal?.nextElementSibling?.textContent, "7");
+    assert.match(container.textContent || "", /Backlog ▲ \+4 year to date/);
     click("Quarter");
     assert.deepEqual(chartInput(1), [
       { name: "Q4 '25", NC: 0, OFI: 2, Other: 0, Total: 2 },
@@ -126,5 +129,31 @@ for (const timezone of ["Europe/Amsterdam", "America/New_York"]) {
       { name: "2025", NC: 0, Total: 0 },
       { name: "2026", NC: 3, Total: 3 },
     ]);
+  });
+
+  test(`January activity changes YTD backlog from its opening balance in ${timezone}`, () => {
+    process.env.TZ = timezone;
+    asOf = [2026, 0, 31];
+    const januaryIssues = [reported("2026-01-01", "OFI"), reported("2026-01-31T23:59:59Z", "NC Minor")];
+    act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: januaryIssues }), container); });
+    assert.deepEqual(chartInput(0), [{ name: "Jan 26", Created: 2, Closed: 0, Backlog: 2, Net: 2 }]);
+    assert.match(container.textContent || "", /Backlog ▲ \+2 year to date/);
+  });
+
+  test(`New Year's Day closures reduce carried backlog in ${timezone}`, () => {
+    process.env.TZ = timezone;
+    asOf = [2026, 0, 1];
+    const carriedIssues = [
+      reported("2025-12-31T23:59:59Z", "OFI", "2026-01-01T23:59:59Z"),
+      reported("2025-12-31", "NC Minor"),
+      reported("2025-12-30", "OFI", "2025-12-31T23:59:59Z"),
+      reported("2026-01-01", "OFI", "2026-01-01"),
+      reported("2026-01-02", "OFI"),
+    ];
+    act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: carriedIssues }), container); });
+    assert.deepEqual(chartInput(0), [{ name: "Jan 26", Created: 1, Closed: 2, Backlog: 1, Net: -1 }]);
+    assert.match(container.textContent || "", /Backlog ▼ -1 year to date/);
+    act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: [] }), container); });
+    assert.match(container.textContent || "", /Backlog flat year to date/);
   });
 }

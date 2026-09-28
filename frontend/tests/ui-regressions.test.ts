@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, afterEach, beforeEach, test } from "node:test";
-import type { IIssue } from "../src/webparts/qstarIssueManager/models/IIssue";
+import type { IIssue, IProgressLogEntry } from "../src/webparts/qstarIssueManager/models/IIssue";
 import { IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
 import { addCalendarDays, todayDate } from "../src/webparts/qstarIssueManager/domain/calendarDates";
 
@@ -599,4 +599,218 @@ test("accepted reopening offers reload from the closed detail without resubmitti
   await click("Reload saved issue");
   assert.equal(container.querySelector('[role="status"]'), null);
   assert.equal(field("Status").value, "In Progress");
+});
+
+function progressInput(): HTMLTextAreaElement {
+  const input = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
+  assert.ok(input);
+  return input;
+}
+
+function writeProgress(text: string): void {
+  const input = progressInput();
+  assert.equal(input.disabled, false);
+  act(() => { Simulate.change(input, { target: { value: text } } as never); });
+}
+
+function journalText(): string[] {
+  return Array.from(container.querySelectorAll("ol li p")).map(element => element.textContent || "");
+}
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    test(`${transformedInto} ${action} locks progress until the closed view replaces the form`, async () => {
+      const original = issue({
+        transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+        implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+      });
+      const pending = deferred<void>();
+      let writes = 0;
+      await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+        writes += 1;
+        assert.equal(patch.status, "Closed");
+        await pending.promise;
+        return { ...original, ...patch, eTag: '"2"' };
+      } }, [original]);
+      await click("Issue register");
+      await openIssue();
+      assert.equal(progressInput().disabled, false);
+      if (action === "Save changes") change("Status", "Closed");
+      await click(action);
+      assert.equal(progressInput().disabled, true);
+      assert.equal(button("Add update").disabled, true);
+      await act(async () => { pending.resolve(); });
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(button("Re-open issue").disabled, false);
+      assert.equal(writes, 1);
+    });
+  }
+}
+
+test("a rejected closing transition unlocks and preserves the existing progress draft", async () => {
+  const pending = deferred<IIssue>();
+  await renderApp({ updateIssue: () => pending.promise }, [issue({ transformedInto: "OFI" })]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Keep this progress draft");
+  await click("Verify & close");
+  assert.equal(progressInput().disabled, true);
+  assert.equal(button("Add update").disabled, true);
+  await act(async () => { pending.reject(new Error("Closure rejected")); });
+  assert.equal(progressInput().disabled, false);
+  assert.equal(progressInput().value, "Keep this progress draft");
+  assert.equal(button("Add update").disabled, false);
+});
+
+for (const first of ["update", "append"] as const) {
+  for (const withIds of [true, false]) {
+    test(`${first} requested first preserves both identical journal entries ${withIds ? "with" : "without"} server IDs`, async () => {
+      const initialEntry: IProgressLogEntry = { id: withIds ? 10 : undefined, text: "The same legitimate observation", author: "Quality Manager", ts: "2026-09-28T12:00:00Z" };
+      let stored = issue({ progressLog: [initialEntry] });
+      const gates = { update: deferred<void>(), append: deferred<void>() };
+      const calls: string[] = [];
+      const versions: string[] = [];
+      await renderApp({
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          calls.push("update");
+          versions.push(eTag);
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          const snapshot = { ...stored, progressLog: [...stored.progressLog] };
+          await gates.update.promise;
+          return snapshot;
+        },
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+          calls.push("append");
+          assert.equal(entry.text, initialEntry.text);
+          const saved = { ...initialEntry, id: withIds ? 11 : undefined };
+          stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+          await gates.append.promise;
+          return saved;
+        },
+      }, [stored]);
+      await click("Issue register");
+      await openIssue();
+      change("Follow up (Quality Team notes)", "Saved independently of the journal");
+      writeProgress(initialEntry.text);
+      const second = first === "update" ? "append" : "update";
+      await click(first === "update" ? "Save changes" : "Add update");
+      await click(second === "update" ? "Save changes" : "Add update");
+      await act(async () => { gates[second].resolve(); });
+      await act(async () => { gates[first].resolve(); });
+      assert.deepEqual(journalText(), [initialEntry.text, initialEntry.text]);
+      assert.deepEqual(calls, [first, second]);
+      assert.deepEqual(versions, ['"1"']);
+      assert.equal(progressInput().value, "");
+      assert.equal(field("Follow up (Quality Team notes)").value, "Saved independently of the journal");
+      assert.equal(button("Save changes").disabled, true);
+    });
+  }
+}
+
+test("a queued append proceeds after an issue save fails without discarding either draft", async () => {
+  const pending = deferred<IIssue>();
+  const calls: string[] = [];
+  await renderApp({
+    updateIssue: () => { calls.push("update"); return pending.promise; },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { calls.push("append"); return { ...entry, id: 18 }; },
+  });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Retain this rejected draft");
+  await click("Save changes");
+  writeProgress("An independent accepted observation");
+  await click("Add update");
+  assert.deepEqual(calls, ["update"]);
+  await act(async () => { pending.reject(new Error("Issue write rejected")); });
+  assert.deepEqual(calls, ["update", "append"]);
+  assert.deepEqual(journalText(), ["An independent accepted observation"]);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Retain this rejected draft");
+  assert.equal(button("Save changes").disabled, false);
+  assert.equal(progressInput().value, "");
+  assert.match(container.textContent || "", /Issue write rejected/);
+});
+
+test("closing waits for an accepted append and renders it once in the closed journal", async () => {
+  const pending = deferred<void>();
+  let stored = issue({ transformedInto: "OFI" });
+  const calls: string[] = [];
+  await renderApp({
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      calls.push("append");
+      const saved = { ...entry, id: 20 };
+      stored = { ...stored, progressLog: [saved] };
+      await pending.promise;
+      return saved;
+    },
+    updateIssue: async (_id: number, patch: Partial<IIssue>) => { calls.push("close"); stored = { ...stored, ...patch, eTag: '"2"' }; return stored; },
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Final closure evidence");
+  await click("Add update");
+  await click("Verify & close");
+  assert.deepEqual(calls, ["append"]);
+  assert.equal(progressInput().disabled, true);
+  await act(async () => { pending.resolve(); });
+  assert.deepEqual(calls, ["append", "close"]);
+  assert.deepEqual(journalText(), ["Final closure evidence"]);
+  assert.equal(container.querySelector("textarea"), null);
+});
+
+test("reload and append use the same issue queue so a stale read cannot erase an accepted entry", async () => {
+  const pendingRead = deferred<void>();
+  let stored = issue();
+  const calls: string[] = [];
+  await renderApp({
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      calls.push("append");
+      const id = stored.progressLog.length + 1;
+      const saved = { ...entry, id, saveWarning: id === 1 ? "Your update was posted. Reload its server details." : undefined };
+      stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+      return saved;
+    },
+    getIssue: async () => {
+      calls.push("reload");
+      const snapshot = { ...stored, progressLog: [...stored.progressLog] };
+      await pendingRead.promise;
+      return snapshot;
+    },
+  });
+  await click("Issue register");
+  await openIssue();
+  writeProgress("First accepted observation");
+  await click("Add update");
+  await click("Reload saved issue");
+  writeProgress("Second accepted observation");
+  await click("Add update");
+  await act(async () => { pendingRead.resolve(); });
+  assert.deepEqual(calls, ["append", "reload", "append"]);
+  assert.deepEqual(journalText().sort(), ["First accepted observation", "Second accepted observation"]);
+  assert.equal(progressInput().value, "");
+});
+
+test("operations for another issue remain independent of a pending save", async () => {
+  const pending = deferred<void>();
+  const first = issue();
+  const second = issue({ id: 2, qsNumber: 1002 });
+  const writes: number[] = [];
+  await renderApp({ updateIssue: async (id: number, patch: Partial<IIssue>) => {
+    writes.push(id);
+    if (id === first.id) await pending.promise;
+    return { ...(id === first.id ? first : second), ...patch, eTag: '"2"' };
+  } }, [first, second]);
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "First issue note");
+  await click("Save changes");
+  await click("Back to register");
+  const secondRow = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent?.includes("QS-1002"));
+  assert.ok(secondRow);
+  await act(async () => { Simulate.click(secondRow); });
+  change("Follow up (Quality Team notes)", "Second issue note");
+  await click("Save changes");
+  assert.deepEqual(writes, [1, 2]);
+  assert.equal(button("Save changes").disabled, true);
+  await act(async () => { pending.resolve(); });
+  assert.equal(field("Follow up (Quality Team notes)").value, "Second issue note");
 });

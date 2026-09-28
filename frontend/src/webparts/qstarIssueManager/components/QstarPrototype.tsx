@@ -581,6 +581,7 @@ export function Dashboard({ issues: allIssues }) {
   const ncRate = ncs.length ? Math.round((ncVerified.length / ncs.length) * 100) : 0;
 
   // Monthly trend — current year (Jan → current month)
+  const backlogAt = (end) => datedCreated.filter((i) => iso(i.reportDate) <= end && (i.status !== "Closed" || (iso(i.closedDate) && iso(i.closedDate) > end))).length;
   const months = [];
   for (let mo = 0; mo <= nowD.getMonth(); mo++) {
     const d = new Date(curYear, mo, 1);
@@ -590,10 +591,10 @@ export function Dashboard({ issues: allIssues }) {
     const c = datedCreated.filter((i) => iso(i.reportDate).slice(0, 7) === month).length;
     const cl = closed.filter((i) => iso(i.closedDate).slice(0, 7) === month && iso(i.closedDate) <= end).length;
     // Open backlog at month-end: created on/before end, and not yet closed by end (all-time, so the backlog is accurate)
-    const backlog = datedCreated.filter((i) => iso(i.reportDate) <= end && (i.status !== "Closed" || (iso(i.closedDate) && iso(i.closedDate) > end))).length;
+    const backlog = backlogAt(end);
     return { name: key, Created: c, Closed: cl, Backlog: backlog, Net: c - cl };
   });
-  const backlogChange = trend.length ? trend[trend.length - 1].Backlog - trend[0].Backlog : 0;
+  const backlogChange = backlogAt(asOf) - backlogAt(addDays(yearStart, -1));
 
   const sevColors = { Critical: CHART.rose, High: CHART.orange, Medium: CHART.amber, Low: CHART.slate };
   const sourceColors = [CHART.violet, CHART.teal];
@@ -943,12 +944,12 @@ function Register({ issues, onOpen, filter, setFilter }) {
 /* ============================================================
    Progress log (append-only, immutable)
    ============================================================ */
-export function ProgressLog({ entries, canAdd, author, onAdd }) {
+export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false }) {
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const submit = async () => {
-    if (saving || !text.trim()) return;
+    if (disabled || saving || !text.trim()) return;
     setSaving(true);
     setError("");
     try {
@@ -964,10 +965,10 @@ export function ProgressLog({ entries, canAdd, author, onAdd }) {
       <SectionTitle icon={ListChecks} right={<span className="inline-flex items-center gap-1 text-xs text-slate-400"><Lock size={12} />Timestamped · cannot be edited or deleted</span>}>Progress log</SectionTitle>
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <TextArea disabled={saving} value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
+          <TextArea disabled={disabled || saving} value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
-            <Btn disabled={!text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
+            <Btn disabled={disabled || !text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
           </div>
           {error && <p role="alert" className="mt-2 text-sm text-rose-700">{error}</p>}
         </div>
@@ -1123,6 +1124,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   const [d, setD] = useState(issue);
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const [holdOpen, setHoldOpen] = useState(false);
@@ -1146,13 +1148,14 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
       if (next.taskOwner && !next.taskOwnerEmail) throw new Error("Enter the task owner's Microsoft 365 email.");
       if (next.verifiedBy && !next.verifiedByEmail && !next.verifiedById) throw new Error("Enter the verifier's Microsoft 365 email.");
       const patch = buildIssueTransition(baseline, changedIssueFields(baseline, next));
+      setClosing(next.status === "Closed");
       acceptSaved(await onUpdate(issue.id, patch, baseline.eTag));
       return true;
     } catch (failure) {
       setError(failure);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
-    } finally { setSaving(false); }
+    } finally { setSaving(false); setClosing(false); }
   };
   const putOnHold = async (holdReason, holdUntil) => { if (await save({ status: "On Hold", holdReason, holdUntil })) setHoldOpen(false); };
   const startTest = () => save({ implementationDate: d.implementationDate || iso(today()), status: NC_TEST });
@@ -1229,7 +1232,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={closing} author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -1796,7 +1799,7 @@ export default function App({
   const [reloadingSaved, setReloadingSaved] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
-  const pendingWrites = useRef(new Set());
+  const pendingOperations = useRef(new Map());
   const [openId, setOpenId] = useState(null);
   const [regFilter, setRegFilter] = useState({ q: "", statuses: [], type: "", bu: "", overdueOnly: false });
 
@@ -1820,12 +1823,20 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
+  const runIssueOperation = (id, operation) => {
+    const previous = pendingOperations.current.get(id) || Promise.resolve();
+    const pending = previous.catch(() => undefined).then(operation);
+    pendingOperations.current.set(id, pending);
+    return pending.finally(() => {
+      if (pendingOperations.current.get(id) === pending) pendingOperations.current.delete(id);
+    });
+  };
   const acceptIssue = (saved) => {
     setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
     setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
-  const reloadIssue = async (id) => acceptIssue(await dataService.getIssue(id));
+  const reloadIssue = (id) => runIssueOperation(id, async () => acceptIssue(await dataService.getIssue(id)));
   const reloadSavedIssue = async () => {
     if (reloadingSaved) return;
     setReloadingSaved(true);
@@ -1833,13 +1844,11 @@ export default function App({
     catch (error) { setSaveWarning({ ...saveWarning, message: `Your change was saved, but reloading is still unavailable: ${error instanceof Error ? error.message : String(error)}. Do not submit it again.` }); }
     finally { setReloadingSaved(false); }
   };
-  const updateIssue = async (id, patch, expectedETag) => {
-    if (pendingWrites.current.has(id)) throw new Error("A save is already in progress. Wait for it to finish.");
+  const updateIssue = (id, patch, expectedETag) => runIssueOperation(id, async () => {
     const previous = issues.find((issue) => issue.id === id);
     if (!previous) throw new Error("Issue is no longer available. Reload the register.");
     if (!previous.eTag) throw new Error("Reload this issue before saving so its current version can be checked.");
     const normalized = buildIssueTransition(previous, patch);
-    pendingWrites.current.add(id);
     setSaveError("");
     try {
       return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
@@ -1849,10 +1858,10 @@ export default function App({
         setSaveWarning({ message: error.message, issueId: id });
       } else setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
-    } finally { pendingWrites.current.delete(id); }
-  };
+    }
+  });
 
-  const addProgress = async (id, entry) => {
+  const addProgress = (id, entry) => runIssueOperation(id, async () => {
     const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
     setSaveError("");
     try {
@@ -1865,7 +1874,7 @@ export default function App({
       setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
     }
-  };
+  });
 
   // Flow B consumes accepted journal rows directly; no second write can make
   // an accepted comment appear failed and invite a duplicate submission.
