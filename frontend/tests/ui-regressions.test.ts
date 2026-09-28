@@ -757,6 +757,62 @@ test("closing waits for an accepted append and renders it once in the closed jou
   assert.equal(container.querySelector("textarea"), null);
 });
 
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    test(`${transformedInto} ${action} cancels closure after a pending append fails and allows retry`, async () => {
+      let stored = issue({
+        transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+        implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+      });
+      const attempts = [deferred<void>(), deferred<void>()];
+      let appends = 0;
+      let closures = 0;
+      await renderApp({
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+          const attempt = attempts[appends++];
+          await attempt.promise;
+          const saved = { ...entry, id: 21 };
+          stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+          return saved;
+        },
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          closures += 1;
+          assert.equal(patch.status, "Closed");
+          assert.equal(eTag, '"1"');
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          return stored;
+        },
+      }, [stored]);
+      await click("Issue register");
+      await openIssue();
+      writeProgress("Closure evidence that must not be lost");
+      await click("Add update");
+      if (action === "Save changes") change("Status", "Closed");
+      await click(action);
+      assert.equal(closures, 0);
+      assert.equal(progressInput().disabled, true);
+      await act(async () => { attempts[0].reject(new Error("Journal append rejected")); });
+      assert.equal(closures, 0);
+      assert.notEqual(stored.status, "Closed");
+      assert.equal(progressInput().value, "Closure evidence that must not be lost");
+      assert.equal(progressInput().disabled, false);
+      assert.equal(button("Add update").disabled, false);
+      assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Journal append rejected/);
+      assert.deepEqual(journalText(), []);
+      await click("Add update");
+      await click(action);
+      assert.equal(appends, 2);
+      assert.equal(closures, 0);
+      await act(async () => { attempts[1].resolve(); });
+      assert.equal(closures, 1);
+      assert.equal(stored.status, "Closed");
+      assert.deepEqual(journalText(), ["Closure evidence that must not be lost"]);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(container.querySelector('[role="alert"]'), null);
+    });
+  }
+}
+
 test("reload and append use the same issue queue so a stale read cannot erase an accepted entry", async () => {
   const pendingRead = deferred<void>();
   let stored = issue();

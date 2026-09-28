@@ -1823,9 +1823,10 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
-  const runIssueOperation = (id, operation) => {
+  const runIssueOperation = (id, operation, requirePreviousSuccess = false) => {
     const previous = pendingOperations.current.get(id) || Promise.resolve();
-    const pending = previous.catch(() => undefined).then(operation);
+    const ready = requirePreviousSuccess ? previous : previous.catch(() => undefined);
+    const pending = ready.then(operation);
     pendingOperations.current.set(id, pending);
     return pending.finally(() => {
       if (pendingOperations.current.get(id) === pending) pendingOperations.current.delete(id);
@@ -1859,7 +1860,7 @@ export default function App({
       } else setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
     }
-  });
+  }, patch.status === "Closed");
 
   const addProgress = (id, entry) => runIssueOperation(id, async () => {
     const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
