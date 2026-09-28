@@ -1,0 +1,101 @@
+
+{{#description}}
+/**
+ * {{.}}
+ */
+{{/description}}
+@JsonIgnoreProperties(ignoreUnknown = true)
+@Getter
+@Setter
+@EqualsAndHashCode(callSuper = true)
+@AllArgsConstructor
+@NoArgsConstructor
+{{^hasChildren}}@Builder{{/hasChildren}}
+{{>generatedAnnotation}}{{#discriminator}}{{>typeInfoAnnotation}}{{/discriminator}}{{>xmlAnnotation}}{{>additionalModelTypeAnnotations}}
+public class {{classname}} {{#parent}}extends {{{parent}}}{{/parent}}{{^parent}} extends AbstractModel {{/parent}} {{#serializableModel}}implements Serializable{{/serializableModel}} {
+{{#serializableModel}}
+  private static final long serialVersionUID = 1L;
+
+{{/serializableModel}}
+  {{#vars}}
+
+    {{#isEnum}}
+    {{^isContainer}}
+{{>enumClass}}
+    {{/isContainer}}
+    {{#isContainer}}
+    {{#mostInnerItems}}
+{{>enumClass}}
+    {{/mostInnerItems}}
+    {{/isContainer}}
+    {{/isEnum}}
+    {{#vendorExtensions.x-extra-annotation}}
+        {{{vendorExtensions.x-extra-annotation}}}
+    {{/vendorExtensions.x-extra-annotation}}
+    {{#useBeanValidation}}{{>beanValidation}}{{/useBeanValidation}}
+  {{#jackson}}
+  @JsonProperty("{{baseName}}"){{#withXml}}
+  @JacksonXmlProperty({{#isXmlAttribute}}isAttribute = true, {{/isXmlAttribute}}{{#xmlNamespace}}namespace="{{xmlNamespace}}", {{/xmlNamespace}}localName = "{{#xmlName}}{{xmlName}}{{/xmlName}}{{^xmlName}}{{baseName}}{{/xmlName}}"){{/withXml}}
+  {{/jackson}}
+
+  {{#gson}}
+  @SerializedName("{{baseName}}")
+  {{/gson}}
+  {{#isContainer}}
+  {{#openApiNullable}}
+  {{#defaultValue}}@Builder.Default{{/defaultValue}}
+  private {{>nullableDataType}} {{name}} {{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/openApiNullable}}
+  {{^openApiNullable}}
+  {{#defaultValue}}@Builder.Default{{/defaultValue}}
+  private {{>nullableDataType}} {{name}} {{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/openApiNullable}}
+  {{/isContainer}}
+  {{^isContainer}}
+  {{#openApiNullable}}
+  {{#defaultValue}}@Builder.Default{{/defaultValue}}
+  private {{>nullableDataType}} {{name}}{{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/openApiNullable}}
+  {{^openApiNullable}}
+  {{#defaultValue}}@Builder.Default{{/defaultValue}}
+  private {{>nullableDataType}} {{name}}{{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/openApiNullable}}
+  {{/isContainer}}
+
+  {{/vars}}
+  {{#vars}}
+  {{#isArray}}
+
+  public {{classname}} add{{nameInCamelCase}}Item({{{items.datatypeWithEnum}}} {{name}}Item) {
+    {{#openApiNullable}}
+    {{^required}}
+    if (this.{{name}} == null{{#isNullable}} || !this.{{name}}.isPresent(){{/isNullable}}) {
+      this.{{name}} = {{#isNullable}}JsonNullable.of({{{defaultValue}}}){{/isNullable}}{{^isNullable}}{{{defaultValue}}}{{/isNullable}};
+    }
+    {{/required}}
+    this.{{name}}{{#isNullable}}.get(){{/isNullable}}.add({{name}}Item);
+    {{/openApiNullable}}
+    {{^openApiNullable}}
+    if (this.{{name}} == null) {
+      this.{{name}} = {{{defaultValue}}};
+    }
+    this.{{name}}.add({{name}}Item);
+    {{/openApiNullable}}
+    return this;
+  }
+  {{/isArray}}
+  {{#isMap}}
+
+  public {{classname}} put{{nameInCamelCase}}Item(String key, {{{items.datatypeWithEnum}}} {{name}}Item) {
+    {{^required}}
+    if (this.{{name}} == null) {
+      this.{{name}} = {{{defaultValue}}};
+    }
+    {{/required}}
+    this.{{name}}.put(key, {{name}}Item);
+    return this;
+  }
+  {{/isMap}}
+
+  {{/vars}}
+}

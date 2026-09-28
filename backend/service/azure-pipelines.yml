@@ -1,0 +1,53 @@
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  projectName: 'qstar-issue-manager-backend'
+
+steps:
+  - task: Gradle@2
+    inputs:
+      gradleWrapperFile: 'gradlew'
+      tasks: 'build'
+      publishJUnitResults: true
+      testResultsFiles: '**/TEST-*.xml'
+      jdkVersionOption: 1.11
+      sonarQubeRunAnalysis: false
+
+  - script: |
+      export dateNow="$(date "+%Y-%m-%d_%H-%M-%S")"
+      export gitSHA1=$(Build.SourceVersion)
+      export imageTag=$(Build.SourceVersion)
+
+      echo "##vso[task.setvariable variable=dateNow]$dateNow"
+      echo "##vso[task.setvariable variable=gitSHA1]$gitSHA1"
+      echo "##vso[task.setvariable variable=imageTag]$imageTag"
+    displayName: 'Set Buildscript Variables'
+
+  - task: Docker@2
+    displayName: Push Image to Registry
+    inputs:
+      command: buildAndPush
+      containerRegistry: Docker Registry
+      Dockerfile: $(Build.Repository.LocalPath)/Dockerfile
+      repository: qstar-issue-manager-backend
+      tags: |
+        latest
+        $(imageTag)
+
+  - script: |
+      export extractedVersion=$(extractedVersion)
+      export gitSHA1=$(gitSHA1)
+      export dateNow=$(dateNow)
+      export imageTag=$(imageTag)
+      export appVersion=$(appVersion)
+
+      envsubst '$dateNow:$appVersion:$gitSHA1:$imageTag' < $(Build.Repository.LocalPath)/kubernetes.yaml > $(Build.Repository.LocalPath)/kubernetes_out.yaml
+      cat $(Build.Repository.LocalPath)/kubernetes_out.yaml
+    displayName: 'Prepare kubernetes.yaml'
+
+  - task: PublishPipelineArtifact@0
+    displayName: 'Publish kubernetes.yaml'
+    inputs:
+      artifactName: 'kubernetesYAML'
+      targetPath: '$(Build.Repository.LocalPath)/kubernetes_out.yaml'

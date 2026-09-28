@@ -1,0 +1,81 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: qstar-issue-manager-backend
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qstar-issue-manager-backend
+  template:
+    metadata:
+      labels:
+        app: qstar-issue-manager-backend
+      annotations:
+        app/git: "${gitSHA1}"
+        app/timestamp: "${dateNow}"
+    spec:
+      terminationGracePeriodSeconds: 61
+      containers:
+        - name: qstar-issue-manager-backend
+          image: tmregistry.azurecr.io/qstar-issue-manager-backend:${imageTag}
+          resources:
+            requests:
+              memory: "400Mi"
+              cpu: "100m"
+            limits:
+              memory: "750Mi"
+              cpu: "200m"
+          envFrom:
+            - secretRef:
+                name: qstar-issue-manager-backend-secret
+            - configMapRef:
+                name: qstar-issue-manager-backend-config
+          ports:
+            - containerPort: 8080
+          imagePullPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qstar-issue-manager-backend-service
+  namespace: default
+  labels:
+    app: qstar-issue-manager-backend
+spec:
+  selector:
+    app: qstar-issue-manager-backend
+  ports:
+    - name: qstar-backend
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: qstar-issue-manager-backend-ingress
+  namespace: default
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    kubernetes.io/ingress.allow-http: "false"
+    kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  tls:
+    - hosts:
+        - ${host}
+      secretName: tls-secret
+  rules:
+    - host: ${host}
+      http:
+        paths:
+          - path: /api
+            backend:
+              serviceName: qstar-issue-manager-backend-service
+              servicePort: 8080

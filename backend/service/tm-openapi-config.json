@@ -1,0 +1,8 @@
+{
+  "library": "spring-boot",
+  "modelPackage": "com.timematters.qstar.api.model",
+  "apiPackage": "com.timematters.qstar.api.controller",
+  "invokerPackage": "com.timematters.qstar.api",
+  "modelNamePrefix": "",
+  "modelNameSuffix": "ATO"
+}

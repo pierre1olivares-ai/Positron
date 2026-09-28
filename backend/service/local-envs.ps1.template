@@ -1,0 +1,18 @@
+$env:SPRING_PROFILES_ACTIVE='local'
+
+$env:TM_QSTAR_BUGSNAG_KEY=
+$env:TM_QSTAR_DATASOURCE_URL=
+$env:TM_QSTAR_DATASOURCE_USERNAME=
+$env:TM_QSTAR_DATASOURCE_PASSWORD=
+
+$env:TM_QSTAR_AD_CLIENT_ID=
+$env:TM_QSTAR_AD_CLIENT_SECRET=
+$env:TM_QSTAR_AD_TENANT_ID=
+
+# App identity this backend uses to call Microsoft Graph (Sites.Selected) against
+# the Quality SharePoint site. May be the same registration as AD_CLIENT_ID/SECRET
+# above, or a separate one — see application.properties.
+$env:TM_QSTAR_SP_CLIENT_ID=
+$env:TM_QSTAR_SP_CLIENT_SECRET=
+$env:TM_QSTAR_SP_SITE_HOSTNAME=
+$env:TM_QSTAR_SP_SITE_PATH=

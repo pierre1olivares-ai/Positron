@@ -5,3 +5,5 @@ lib/
 temp/
 *.log
 .claude/settings.local.json
+.claude/launch.json
+frontend/prototype/serve.cjs

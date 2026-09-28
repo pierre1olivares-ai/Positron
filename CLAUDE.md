@@ -9,22 +9,23 @@ A quality‑issue management tool for **time:matters** (logistics; Lufthansa Car
 - A **working prototype** exists as a **single‑file React app**: [`frontend/prototype/qstar-issue-manager.jsx`](frontend/prototype/qstar-issue-manager.jsx). It currently persists to an injected `window.storage` shim (browser localStorage in the standalone build).
 - A **self‑contained preview** exists: [`frontend/prototype/qstar-live.html`](frontend/prototype/qstar-live.html) (React + Recharts + Lucide bundled; Tailwind via a public CDN — see constraint below).
 - The prototype is feature‑complete for review and has been validated with the Quality team.
-- The repo is split into `frontend/` (SPFx web part) and `backend/` (SharePoint List + Power Automate — see `backend/README.md`).
-- The **SPFx web part is scaffolded and builds/packages cleanly** (`frontend/`, SPFx 1.20, React, Node 18 via nvm). The **data layer is implemented for real** — `frontend/src/webparts/qstarIssueManager/services/SharePointDataService.ts` reads/writes the SharePoint lists via SharePoint REST (PnPjs), not Graph (see the rationale in `backend/sharepoint/qstar-sharepoint-graph-integration.md` §4) — plus a **Connection Diagnostics** self-test wired to a button in the web part. What's still the prototype: the actual UI has not been ported into the web part yet, and role resolution still needs wiring to Entra groups.
+- The repo is split into `frontend/` (SPFx web part) and `backend/` (SharePoint List + Power Automate + now a Java backend service — see `backend/README.md`).
+- The **SPFx web part is scaffolded and builds/packages cleanly** (`frontend/`, SPFx 1.20, React, Node 18 via nvm). The **data layer has two implementations** behind one `IDataService` interface, switchable via a web part property: `SharePointDataService.ts` (SharePoint REST/PnPjs, signed-in user, works today) and `BackendApiDataService.ts` (calls the Java backend below over Azure-AD-secured `AadHttpClient`, the target architecture, not usable until the backend is deployed). Each has its own **Connection Diagnostics** self-test wired to the same button in the web part. What's still the prototype: the actual UI has not been ported into the web part yet, and role resolution still needs wiring to Entra groups.
+- **A Java/Spring Boot backend now exists** at `backend/service/`, scaffolded from time:matters' internal backend template (IT shared it Sept 2026). It's a **thin authenticated gateway**, not a replacement data store: SharePoint is still the system of record, reached server-side via Microsoft Graph with the backend's own app identity (`Sites.Selected`), while the backend validates the frontend's Azure AD bearer token and applies business rules. `./gradlew build` succeeds (verified — JDK 21, compiles and packages the bootJar); running it needs real Postgres + Azure AD/SharePoint credentials and infra (Azure DevOps, ACR, Kubernetes) nobody has provisioned yet. See `backend/service/README.md` for what was fixed in the template itself (it had never been compiled against the Spring Boot 3.3.4 / Jakarta EE stack it declared) and what's still needed.
 
-## The goal now: productionize into Microsoft 365 / SharePoint
+## The goal now: productionize into Microsoft 365 / SharePoint, behind IT's standard backend template
 Turn the prototype into a maintainable, deployed tool:
 1. Put the code under version control (this repo).
 2. Repackage as an **SPFx web part** (SharePoint Framework) that runs inside a **single dedicated SharePoint site**.
-3. Replace `window.storage` with a **SharePoint List** data layer (read/write via SPFx/Graph, acting as the signed‑in user).
+3. Replace `window.storage` with a **SharePoint List** data layer, reached either directly (SPFx/Graph, signed-in user) or through the Java backend gateway (Azure AD bearer token → backend → Graph with the backend's app identity).
 4. Resolve the four roles (Admin / Quality Manager / Task Owner / Reader) from **Microsoft 365 (Entra ID)** — ideally security groups.
 5. Move reminders/notifications to **Power Automate** (intake flow + daily reminder flow); intake via a **Microsoft Form**.
 
 ### Hard constraints for production
 - **No public‑internet calls.** Bundle all assets locally (the preview's Tailwind CDN must be removed). The app must load nothing from external sites.
-- **Contained to one site.** If Graph is used, request **`Sites.Selected`** scoped to the Q‑Star site only — never tenant‑wide scopes.
-- **No secrets in the front‑end.** Use the user's delegated identity.
-- **Data stays in the tenant** (SharePoint List).
+- **Contained to one site.** If Graph is used, request **`Sites.Selected`** scoped to the Q‑Star site only — never tenant‑wide scopes. (The backend's own Graph calls follow this too.)
+- **No secrets in the front‑end.** Use the user's delegated identity, or — via the backend — the backend's own app identity behind an authenticated API boundary.
+- **Data stays in the tenant** (SharePoint List remains the system of record; the backend's Postgres database holds no Q-Star business data).
 
 ## Domain notes Claude Code should know
 - **Roles & tabs:** Admin (full + IT settings), Quality Manager (full, no IT), Task Owner (My tasks first; Dashboard, Register, Reminders), Reader (Dashboard only).
@@ -36,7 +37,9 @@ Turn the prototype into a maintainable, deployed tool:
 ## Repo structure
 - `frontend/prototype/qstar-issue-manager.jsx` — the full prototype app (the starting code; will become the SPFx web part source).
 - `frontend/prototype/qstar-live.html` — clickable preview for demos/requirements.
-- `backend/sharepoint/qstar-sharepoint-graph-integration.md` — SharePoint List column map + the read/write data layer design.
+- `frontend/src/webparts/qstarIssueManager/services/` — `SharePointDataService.ts` + `BackendApiDataService.ts` (two `IDataService` implementations), their matching diagnostics services, `fieldMap.ts`.
+- `backend/service/` — the Java/Spring Boot backend (thin gateway to SharePoint). See `backend/service/README.md`.
+- `backend/sharepoint/qstar-sharepoint-graph-integration.md` — SharePoint List column map + the read/write data layer design (what both `SharePointDataService.ts` and the backend's `IssueRepository.java` implement).
 - `backend/sharepoint/provisioning/provision-qstar.ps1` / `provision-qstar-m365.sh` — scripts that create the List columns.
 - `backend/power-automate/qstar-power-automate-flows.md` — step‑by‑step build of the intake + reminder flows.
 - `docs/qstar-implementation-checklist.md` — the non‑developer rollout plan and IT ask list (governance, security, sequence).
@@ -46,10 +49,11 @@ Turn the prototype into a maintainable, deployed tool:
 2. ~~Split the repo into `frontend/` / `backend/`.~~ Done.
 3. ~~Scaffold an SPFx web part solution inside `frontend/`.~~ Done — builds and packages (`.sppkg`) cleanly.
 4. ~~Implement the SharePoint List data layer.~~ Done as SharePoint REST/PnPjs (`SharePointDataService.ts`), plus a live Connection Diagnostics self-test. Still needs to be run against a real provisioned list — nobody has done that yet (see `backend/sharepoint/connection-test-plan.md`).
-5. Port the React component from `frontend/prototype/qstar-issue-manager.jsx` into the scaffolded web part, wiring it to the `dataService` prop instead of `window.storage`.
-6. Remove the Tailwind CDN from the ported UI; the scaffold already uses SCSS modules.
-7. Wire role resolution to Entra groups.
-8. Confirm the Power Automate flows against the provisioned List — see `backend/sharepoint/connection-test-plan.md` §3–5 (can't be automated; needs a real tenant run-through).
-9. Build, test in a dev site, then follow `docs/qstar-implementation-checklist.md` for deployment.
+5. ~~Align backend and frontend to IT's backend template.~~ Done — `backend/service/` builds cleanly; `BackendApiDataService.ts` calls it. Not runnable yet: needs Postgres, Entra app registrations, and Azure DevOps/ACR/Kubernetes access nobody has provisioned (see `backend/service/README.md`'s "What's still needed").
+6. Port the React component from `frontend/prototype/qstar-issue-manager.jsx` into the scaffolded web part, wiring it to the `dataService` prop instead of `window.storage` (works against either data source mode already).
+7. Remove the Tailwind CDN from the ported UI; the scaffold already uses SCSS modules.
+8. Wire role resolution to Entra groups.
+9. Confirm the Power Automate flows against the provisioned List — see `backend/sharepoint/connection-test-plan.md` §3–5 (can't be automated; needs a real tenant run-through).
+10. Build, test in a dev site, then follow `docs/qstar-implementation-checklist.md` for deployment.
 
 > Ask me (Claude Code) to start with any step — e.g. "scaffold the SPFx solution and port the component," or "build the SharePoint List data layer to replace window.storage."
