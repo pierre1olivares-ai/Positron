@@ -64,20 +64,20 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 
 ### Phase B — Source control: the Git repository *(IT Development)*
 - [ ] IT Development creates a **private Git repository** (Azure DevOps or GitHub Enterprise — whatever your company uses) for the app's code.
-- [ ] They commit the current code (`qstar-issue-manager.jsx`) as the starting point.
+- [ ] They adopt the existing repository and running `frontend/src/` implementation; `frontend/prototype/` remains the historical UI reference.
 - [ ] They set up branch protection and code review so changes are controlled.
 - [ ] *(Optional but recommended)* a build pipeline so a reviewed change automatically produces the deployable package.
 
 ### Phase C — SharePoint site & List: the data home *(IT Infra / SharePoint admin)*
 - [ ] Create the dedicated SharePoint site (decision 1.2).
-- [ ] Create the **Issues List** with the correct columns. For beta use `provision-qstar-beta.ps1` or `provision-qstar-beta-m365.sh`; these create lists only. The production scripts additionally create the four Q-Star groups.
+- [ ] Provision or upgrade the lists using the selected beta/production entry point in the [provisioning guide](../backend/sharepoint/provisioning/README.md), reviewing migrations before changing an existing register.
 - [ ] Confirm the column names/types match the app's field map in `qstar-sharepoint-graph-integration.md`.
 - [ ] Set site membership: only people who should use Q‑Star are members.
 
 ### Phase D — Identity & permissions: the containment *(IT Security / Entra admin)*
 - [ ] **Beta:** enable the web part's Beta access mode and use the Communication site's existing Owners, Members, and Visitors permissions; provisioning skips Q-Star group creation by default.
 - [ ] **Production:** create the four SharePoint role groups (decision 1.3), add users, and nest the corresponding Entra security groups where required by IT governance.
-- [ ] Run the current production provisioner to reconcile list permissions. Issues allow Admin/QM edit and assigned-owner item edit; Progress uses per-issue folders with Add/Read for the current owner and QM (no edit/delete); Config writes belong to Admins. Automate exact grant/revoke on assignment changes.
+- [ ] Apply the [production permission matrix](../backend/sharepoint/provisioning/README.md#journal-migration-and-production-permissions) and deploy [Flow C](../backend/power-automate/qstar-power-automate-flows.md#c--reconcile-assignment-and-journal-permissions) for assignment changes.
 - [ ] Validate nested Entra-group role resolution in the tenant. Only if needed, approve the smallest delegated Microsoft Graph group-membership permission for the SPFx solution.
 - [ ] If any Microsoft Graph **site data** access is later needed, register the app and grant **`Sites.Selected`** — restricted to **only the Q‑Star site** (see Section 4). It is not needed for the current same-site PnPjs data layer.
 - [ ] Confirm **no tenant‑wide permissions** are granted.
@@ -86,7 +86,7 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 ### Phase E — Package & deploy the app *(IT Development + SharePoint admin)*
 - [x] The validated UI is implemented as an **SPFx web part** and wired to SharePoint through PnPjs with native Person fields, paging, diagnostics, and SharePoint-group role resolution.
 - [x] Tailwind, icons, and charts are bundled into the solution; the production web part does not load UI assets from a public CDN.
-- [x] A clean production package is available at `frontend/sharepoint/solution/qstar-issue-manager.sppkg`.
+- [ ] Build the deployable package from the reviewed source using the [frontend instructions](../frontend/README.md#install-test-and-build); generated packages are not committed to Git.
 - [ ] SharePoint admin uploads the package (`.sppkg`) to the **App Catalog** and approves it.
 - [ ] Add the Q‑Star web part to a page on the dedicated site.
 
@@ -117,7 +117,7 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 |---|---|---|
 | **IT Infrastructure / Microsoft 365 & SharePoint admin** | SharePoint sites, the App Catalog, Microsoft Forms, Power Automate environment, service mailboxes | "Please create a dedicated SharePoint site for Q‑Star, create the Issues List using this provisioning script, deploy the supplied App Catalog package, and set up the intake Form and the Power Automate flows from this guide." |
 | **IT Security / Identity (Entra ID / Azure AD)** | Sign‑in, security groups, app registrations & permissions, data classification, Conditional Access | "Please approve four Q‑Star SharePoint role groups backed by Entra security groups, validate nested membership, and confirm that permissions are enforced only on the Q‑Star site and assigned items. No tenant-wide permissions or custom login should be introduced." |
-| **IT Development** | The Git repository, packaging the app (SPFx), the SharePoint/Graph data layer, code review, long‑term maintenance | "Please put this React code into a managed Git repo, convert it to an SPFx web part that stores data in the SharePoint List (per this integration spec), bundle all assets locally with no external internet calls, and own the build/deploy." |
+| **IT Development** | The Git repository, packaging the app (SPFx), the SharePoint data layer, code review, long‑term maintenance | "Please adopt the implemented SPFx source, build the reviewed package, verify the tenant integration using the supplied plan, and own deployment and maintenance." |
 | **(If you have one) Data Protection Officer / Compliance** | Personal‑data handling, retention | "Customer complaints may contain personal data — please confirm classification, retention, and any DPIA need." |
 
 > Tip: send each team the **specific deliverable** they need (next section). A concrete script or spec turns a vague request into a quick task.
@@ -146,11 +146,10 @@ You're not starting from zero — give IT these existing files:
 
 | File | Give it to | Why it helps |
 |---|---|---|
-| `qstar-issue-manager.jsx` | IT Development | The full working app — their starting code |
+| `frontend/src/` and [frontend/README.md](../frontend/README.md) | IT Development | The running SPFx source and build instructions |
 | `qstar-live.html` | Everyone | A clickable preview to demo and to confirm requirements |
 | `qstar-sharepoint-graph-integration.md` | IT Development | The exact List columns and the read/write data layer |
-| `provision-qstar-beta.ps1` *or* `provision-qstar-beta-m365.sh` | SharePoint admin | Beta: creates lists and columns only |
-| `provision-qstar.ps1` *or* `provision-qstar-m365.sh` | SharePoint admin | Production: creates lists, columns, role groups, and site permissions |
+| [Provisioning guide](../backend/sharepoint/provisioning/README.md) | SharePoint admin | Beta/production entry points, migration procedures, and permission reconciliation |
 | `qstar-power-automate-flows.md` | Power Platform / Infra | Step‑by‑step build of the intake + reminder flows |
 | This checklist | You + all IT teams | The overall plan and ownership |
 
@@ -162,7 +161,7 @@ You're not starting from zero — give IT these existing files:
 2. **Git repo** set up — IT Development. *(can run in parallel with 3)*
 3. **SharePoint site + List** created — IT Infra.
 4. **SharePoint role groups + Entra membership + item permissions** — IT Security. *(needs the site from step 3)*
-5. **App converted to SPFx + deployed** — IT Development + admin. *(needs steps 2–4)*
+5. **Implemented SPFx app packaged + deployed** — IT Development + admin. *(needs steps 2–4)*
 6. **Form + Power Automate flows** — IT Infra. *(needs the List from step 3)*
 7. **UAT** — you + pilot users. *(needs steps 5–6)*
 8. **Go live + training** — you + IT.
@@ -174,9 +173,9 @@ Steps 2–4 and 6 can largely overlap; 5 and 7 are the gates.
 ## 7. A realistic word on effort and your role
 
 - **Your role:** product owner — requirements, decisions, testing (UAT), training, and governance. You do **not** need to write code.
-- **IT Development effort:** typically **one developer for a number of days** to convert the prototype to SPFx, wire it to the List, and bundle assets — plus the flows. The prototype and the integration spec remove most of the guesswork, but converting a single‑file app to a production SPFx solution is genuine engineering work, not a copy‑paste.
+- **IT Development effort:** scope the remaining tenant integration, packaging, acceptance, and support work from the [repair handoff](qstar-review-repairs.md). The SPFx port and local data-service repairs already exist; tenant operations still need their own validation.
 - **Biggest dependencies:** getting the SharePoint site + permissions (IT Security sign‑off) and a developer assigned. Start those conversations first.
-- **Keep the loop short:** the in‑app **Feedback** button and your QM feedback round give you a tested requirements set — share it so IT builds the right thing once.
+- **Keep the loop short:** share the Quality Team's feedback and historical preview with IT as the requirements baseline for tenant acceptance.
 
 ---
 

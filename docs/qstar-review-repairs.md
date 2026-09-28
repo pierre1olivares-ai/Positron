@@ -5,9 +5,9 @@ These repairs target the `beta` branch after merging `main` (merge commit `04931
 ## Changes
 
 - Provisioning entry points surface errors and reconcile existing fields, indexes, current Region choices, and reference configuration. Germany maps to Western Europe (Amsterdam) only during an explicit Region migration.
-- Issue saves use edited fields and an ETag. A conflicting save retains the draft; the user explicitly reloads before editing the latest version. Successful creates/appends with failed readback are shown as saved with a warning.
+- See [saving and recovering drafts](../README.md#saving-and-recovering-drafts) for the repaired conflict, busy-state, accepted-write, and recovery behavior.
 - SharePoint IDs allocate new QS references through an immutable `ReferenceOffset`. Existing QS references are preserved. Both intake paths use this rule.
-- Every UI status save validates the NC effectiveness period and verifier identity. OFI closure does not require hidden NC fields. Successful test starts update the editing baseline.
+- See [working with issues](../README.md#working-with-issues) for the repaired lifecycle actions.
 - Production journal entries live in per-issue folders. Current owners and Quality Managers can add/read entries, while SharePoint supplies author/time and folder location determines the issue. Assignment changes remove prior owner grants, including when the owner is cleared.
 - Calendar dates retain their day across time zones and DST. Today's reports count in YTD metrics; ISO date envelopes work in date fields and reminder comparisons.
 - Automation guidance covers on-hold reminders, accepted owner updates, null dates, and deduplication across dates, recipients, and reopened cycles.
@@ -23,13 +23,7 @@ These repairs target the `beta` branch after merging `main` (merge commit `04931
 
 ## Tenant acceptance checks
 
-- Open an issue as two editors. Save from one, then save a different draft from the other. Expect a conflict with the second draft retained and no lost fields.
-- Start an NC test, edit a follow-up note, and save. Confirm the test state stays saved. Try closing from both the button and dropdown before/after the test period; verify an OFI can close without an NC verifier.
-- Change only the owner's email. Assign A, change to B, then clear the owner; verify actual item and journal-folder permissions after each flow completes. Verify a former owner cannot append through REST, and the current owner cannot edit/delete existing entries.
-- Add a QM and owner journal entry. Verify server author/time and the correct issue folder. Simulate rejected writes and failed readbacks; confirm drafts survive rejection and accepted submissions are not duplicated.
-- Submit concurrent browser and Forms reports. Confirm distinct references and stable references after reload, flow retry, and provisioning rerun.
-- Check ISO date envelopes, today's dashboard reports, DST/month-end effectiveness dates, holds with missing DueDate, resumed work, reopened cycles, changed deadlines, and reassigned notification recipients.
-- Change the connection in web-part properties. Confirm a fresh load and role check for the target; Settings must show that target.
+Use the [tenant verification plan](../backend/sharepoint/connection-test-plan.md), including its editing/lifecycle/recovery scenarios. That plan owns the acceptance cases; local interaction and service-contract tests do not establish tenant results.
 
 ## Evidence and limits
 

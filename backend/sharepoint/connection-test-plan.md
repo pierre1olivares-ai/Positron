@@ -18,6 +18,18 @@ Run the Admin connection test. Confirm site/user access, required columns and ty
 - Interrupt the second number-materialization action. Resume the same created item; no duplicate intake should appear. A Forms replay uses its response-ID log.
 - Compare migrated records with the backup: Region aliases map correctly (Germany → Western Europe (Amsterdam)); descriptions, attachments, old QsNumber, progress item IDs, Author and Created remain intact. Repeating provisioning keeps the same offset and journal mapping.
 
+## Editing, lifecycle, and recovery
+
+Verify the [user-facing save and recovery contract](../../README.md#saving-and-recovering-drafts) with real SharePoint sessions. Copy any evidence before refreshing the page, since recovered drafts are session-local.
+
+- Open one issue in two editors. Save in one, then submit a different draft from the other. The stale save must conflict without overwriting saved fields; its draft remains available until explicit reload/discard. Change only an owner's email and confirm the saved native Person identity changes.
+- Start an NC effectiveness test, edit a follow-up note, and save. Confirm the accepted test state persists. Exercise both closure routes before and after the test end, including month ends and a verifier identity; close an OFI without NC-only fields. Reopen and verify the new cycle retains the reference and journal.
+- While a save, append, or reload is pending, return to the register and reopen that issue. Detail/progress editing and both closure routes must remain blocked. A rejected append keeps its text/error, including with intervening reload requests; closing requires a fresh action after pending work settles. An independent issue remains editable.
+- Finish issue A's triage or reload while editing B. B must stay open with its detail and progress drafts intact. A clean editor reopened during an ordinary save must use the accepted version after that save finishes.
+- Leave detail, hold, and progress drafts, then reload after another session closes the issue or reassigns it away. Confirm read-only controls and selectable recovery copies. Reopen or reassign back, type and submit fresh content, and repeat the transition: earlier copies, including identical text in distinct copies, must remain available. Discard one copy and verify other copies, live drafts, and saved data remain unchanged. Successful own detail saves and progress posts must clear only their submitted draft part.
+- Accept a close through each route, then fail its readback. It must remain closed and read-only across register navigation, with unsubmitted recovery content retained. Trigger a saved warning on B and reload B; return to A and use its own **Reload this issue** action. Exercise a failed reload followed by a successful one without losing archives or allowing writes from the unavailable version.
+- Change the connection in web-part properties and confirm Settings displays that target and access is resolved again. Confirm today's reports appear in dashboard year-to-date totals.
+
 ## Production permissions and journal integrity
 
 - Create an unassigned issue; Flow C creates its folder. Assign Owner A; A can edit the issue and append inside its exact folder.

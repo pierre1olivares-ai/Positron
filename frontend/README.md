@@ -12,23 +12,24 @@ Production SPFx 1.20 / React 17 web part for the validated Q-Star Issue Manager.
 - Connection Diagnostics validates access, schema, choices, indexes, and a required-field-safe create/update/delete round trip with cleanup for both Lists.
 - Recharts, Lucide, and generated Tailwind utilities are bundled in the `.sppkg`; production loads no Tailwind CDN.
 - Local development uses `MockDataService`; tenant builds use `SharePointDataService`.
-- Saves send edited fields with the version read when editing began. Conflicts preserve the draft and offer an explicit reload; an accepted write followed by a failed refresh is not treated as a retryable submission.
-- New QS references use an immutable configured offset plus the SharePoint item ID. Existing references remain unchanged; browser and Forms intake use the same allocation rule.
-- Progress entries are appended under secured `issue-{id}` folders. SharePoint supplies author/time; folder paths determine the parent issue.
-- Every status save passes lifecycle validation, including the NC test period and verifier requirements. OFIs can close without NC-only fields.
+- The [integration contract](../backend/sharepoint/qstar-sharepoint-graph-integration.md#4-service-behavior) defines partial writes and version checks; the [provisioning guide](../backend/sharepoint/provisioning/README.md) owns reference allocation and journal upgrades.
+- See the [user guide](../README.md#working-with-issues) for lifecycle actions and [saving and draft recovery](../README.md#saving-and-recovering-drafts) for conflicts, busy controls, accepted-write warnings, and retained recovery copies.
 - Date-only values use calendar arithmetic and local formatting. SharePoint date envelopes are normalized for native date inputs and reminder comparisons.
 - Unit, service-contract, and real React interaction regressions live in `tests/`.
 - The Settings screen displays the actual connection. Change its site/lists in the web-part properties; changing the target remounts the app and resolves the role again.
 
 The original source and standalone preview remain in `prototype/` as the requirements/reference baseline.
+The port in `QstarPrototype.tsx` currently disables ESLint and TypeScript checking with file-level directives; passing those checks does not establish that component's lint or type safety. Its interaction coverage is in `tests/ui-regressions.test.ts`.
 
 ## Requirements
 
 - Node.js `>=18.17.1 <19.0.0`
 - A trusted SPFx development certificate for `gulp serve`
-- For tenant testing: a provisioned Q-Star development site and the four Q-Star SharePoint groups
+- For tenant testing: a Q-Star development site provisioned for the selected [beta or production access model](../backend/sharepoint/provisioning/README.md)
 
 ## Install, test, and build
+
+Run these commands from `frontend/` with the Node version required above:
 
 ```bash
 npm ci
@@ -63,9 +64,4 @@ Then open the tenant SharePoint Workbench with the debug-manifest query printed 
 5. Validate whether nested Entra groups are enumerated through SharePoint; add the documented `MSGraphClientV3` fallback only if required.
 6. Run the role/permission/UAT checklist before App Catalog production deployment.
 
-Use the explicitly named beta provisioning entry point for the pilot:
-
-- PowerShell: `provision-qstar-beta.ps1`
-- Microsoft 365 CLI: `provision-qstar-beta-m365.sh`
-
-The production entry points (`provision-qstar.ps1` and `provision-qstar-m365.sh`) create the lists plus all four Q-Star role groups and reconcile list, issue, and progress-folder permissions. Review existing-data migrations first in [the provisioning guide](../backend/sharepoint/provisioning/README.md).
+Choose the entry point and review existing-data migrations in [the provisioning guide](../backend/sharepoint/provisioning/README.md).

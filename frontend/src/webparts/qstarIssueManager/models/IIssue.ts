@@ -1,6 +1,5 @@
-// Field names and shapes mirror the prototype's in-memory issue object
-// (frontend/prototype/qstar-issue-manager.jsx, STORAGE_KEY "qstar:issues:v2")
-// one-for-one, so the ported UI components require no changes.
+// Keep SharePoint internal field names and serialization in services/fieldMap.ts
+// and services/SharePointDataService.ts, outside the UI's issue model.
 
 export type Severity = "Critical" | "High" | "Medium" | "Low";
 
@@ -35,7 +34,7 @@ export interface IIssue {
   id: number;
   /** SharePoint version used for an optimistic-concurrency update. */
   eTag?: string;
-  /** The record was created successfully, but a follow-up read/write needs retrying. */
+  /** The create was accepted; do not repeat it when reference synchronization or readback fails. */
   saveWarning?: string;
   triaged: boolean;
   status: IssueStatus | undefined;

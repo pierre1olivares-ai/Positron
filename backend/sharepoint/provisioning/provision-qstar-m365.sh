@@ -143,7 +143,7 @@ f_choice() {
   add_field "$1" "<Field Type='Choice' Name='$2' DisplayName='$3' Required='${7:-FALSE}' Indexed='${8:-FALSE}'>${4}${def}</Field>" "${5:-0}"
 }
 
-# f_person <list> <internal> <display> [view] : proper User column, or Text + Email companion
+# PersonAsText is rejected at entry; native User columns are required by the data service.
 f_person() {
   local list="$1" name="$2" disp="$3" view="${4:-0}"
   if [ "$PERSON_AS_TEXT" = "1" ]; then

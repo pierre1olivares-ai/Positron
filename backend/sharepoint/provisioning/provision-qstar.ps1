@@ -3,8 +3,8 @@
  Q-Star Issue Manager — production provisioning (PnP PowerShell)
 =====================================================================
  Creates the Q-Star lists with every column, internal name, choice value
- and index used by the app, plus the four production role groups and their
- site permissions. Use provision-qstar-beta.ps1 for a beta without groups.
+ and index used by the app. See README.md for production permission
+ reconciliation and the separate beta profile.
 
  PREREQUISITES
    1. Install the module:      Install-Module PnP.PowerShell -Scope CurrentUser
@@ -109,7 +109,7 @@ function Ensure-List {
     New-PnPList -Title $Title -Template GenericList -OnQuickLaunch | Out-Null
     Write-Host "+ list '$Title'" -ForegroundColor Green
   }
-  # Title column is unused as a headline here — make it optional.
+  # Config and journal writes may omit Title; do not require it at the list level.
   Set-PnPField -List $Title -Identity "Title" -Values @{ Required = $false } | Out-Null
 }
 
@@ -120,7 +120,7 @@ function Ensure-Field {
     [string]$Default,[switch]$Index
   )
 
-  # Person handling: proper User column, or text + companion email column.
+  # PersonAsText is rejected at entry; native User columns are required by the data service.
   if ($Type -eq "Person") {
     if ($PersonAsText) {
       Ensure-Field -List $List -Display $Display -Internal $Internal -Type "Text" -AddToView:$AddToView

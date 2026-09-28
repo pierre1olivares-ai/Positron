@@ -24,8 +24,6 @@ import {
 
 /* ============================================================
    Q-STAR ISSUE MANAGER  —  ISO 9001:2015 issue handling
-   Test tool. Data persists in window.storage (swap for the
-   SharePoint List when replicating into your repo).
    ============================================================ */
 
 /* ---------- Reference data (mirrors the SharePoint List) ---------- */
@@ -82,7 +80,6 @@ const categoryOf = (i) => {
   if (i.transformedInto === "OFI") return "OFI";
   return "Other";
 };
-// Derive a Microsoft 365 email from an owner's display name (demo convention)
 
 /* ---------- Style maps (Tailwind core classes only) ---------- */
 const STATUS_STYLE = {
@@ -942,7 +939,7 @@ function Register({ issues, onOpen, filter, setFilter }) {
 }
 
 /* ============================================================
-   Progress log (append-only, immutable)
+   Progress log (append-only UI; enforcement depends on SharePoint ACLs)
    ============================================================ */
 export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange }) {
   const [text, setText] = useState("");
@@ -1607,7 +1604,7 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
 }
 
 /* ============================================================
-   Read-only issue detail (Owner viewing others' issues)
+   Read-only issue detail (closed issues and viewers without edit access)
    ============================================================ */
 function ReadOnlyIssueDetail({ issue, onBack, onReopen, onReload, issueBusy = false }) {
   const [reloadError, setReloadError] = useState("");

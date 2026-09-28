@@ -11,6 +11,12 @@ PnP.PowerShell. Both require native Person columns; the old PersonAsText mode is
 rejected with an error instead of producing a schema the web part cannot read.
 Existing text-person lists need a separately reviewed identity migration.
 
+For production use `provision-qstar-m365.sh` or `provision-qstar.ps1`; these also
+reconcile the permissions described below. Choose one toolchain for a run.
+Run the migration examples from `backend/sharepoint/provisioning/`. Use the
+corresponding beta entry point for a pilot: the migration options work in both
+profiles. Beta preserves existing permissions; it does not undo production ACLs.
+
 ## Region migration
 
 The mapping in `region-schema.json` follows the main-branch taxonomy: Germany is
@@ -100,12 +106,12 @@ production isolation or append-only enforcement. An owner without root Add
 permission waits for Flow C to prepare their folder; QMs/Admins may lazily create
 one only when their actual SharePoint permissions allow it.
 
-`ReminderCycle` is a Text issue field: new records use `initial`; reopening stores
-a fresh event token. It allows new reminder milestones without renumbering issues.
+Reminder event identity and the `ReminderCycle` fallback are defined in
+[Flow B](../../power-automate/qstar-power-automate-flows.md#event-identity-and-delivery).
 
 ## Local checks
 
-`node --test backend/sharepoint/provisioning/tests/*.test.mjs` executes
+From the repository root, `node --test backend/sharepoint/provisioning/tests/*.test.mjs` executes
 the real Bash entry point against a stateful m365 test double; it never contacts a
 tenant. It covers fresh provisioning, existing-list migration, a read-only
 preview, offset stability, and failures. Transport-level tests exercise ACL

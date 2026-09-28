@@ -22,7 +22,7 @@ Deploy the updated web part, provisioning and intake flow together during a main
    | Status | Empty |
    | ReminderCycle | initial |
 
-   Normalize old Region answers using `provisioning/region-schema.json` or update the Form before restarting intake. Germany maps to Western Europe (Amsterdam). Unknown values need an explicit business decision.
+   Normalize old Region answers using [region-schema.json](../sharepoint/provisioning/region-schema.json) or update the Form before restarting intake. Unknown values need an explicit business decision.
 4. Compute `add(int(<ReferenceOffset>),int(outputs('Create_item')?['body/ID']))` and update **that item's** QsNumber. Supply any connector-required fields from Create item, never blank them. Existing nonempty references remain unchanged. Retry a failed second action by its recorded created item ID; never create another issue. The web part derives the same reference while materialization is pending.
 5. Keep a service-owned response-ID → created-item-ID intake log. A manual replay must resume an existing response rather than create a duplicate. Reconcile ambiguous Create timeouts before replaying them.
 
@@ -52,7 +52,7 @@ Each recipient gets a separate row. RecipientKey is `toLower(trim(<actual email>
 | Owner status update | `issue:<ID>:update:<OwnerUpdateAt ISO timestamp>` |
 | Accepted progress entry | `progress:<Progress Log item ID>` |
 
-ReminderCycle changes on reopening. A new cycle, due/hold/test-end date, or recipient therefore permits a new delivery. Do not deduplicate using only IssueId/RuleKey or the day the email was sent.
+Treat an empty ReminderCycle as `initial`: browser intake can leave it empty, while Forms sets it explicitly. Reopening writes a fresh event token. A new cycle, due/hold/test-end date, or recipient therefore permits a new delivery. Do not deduplicate using only IssueId/RuleKey or the day the email was sent.
 
 For each `(EventKey, RecipientKey)`:
 

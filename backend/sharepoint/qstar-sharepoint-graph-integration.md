@@ -1,8 +1,8 @@
 # Q-Star — SharePoint integration contract
 
-The deployed SPFx web part uses SharePoint REST through PnPjs with the signed-in user's same-site permissions. No separate Graph data layer or custom API server is involved. Microsoft Forms intake, scheduled notifications, and assignment ACL reconciliation run as three tenant Power Automate flows under a service identity in Q-Star Admins.
+The SPFx web part uses SharePoint REST through PnPjs with the signed-in user's same-site permissions. No separate Graph data layer or custom API server is involved. Microsoft Forms intake, scheduled notifications, and assignment ACL reconciliation require the tenant flows in the [workflow guide](../power-automate/qstar-power-automate-flows.md); those flows are manual deployment instructions, not installed components.
 
-This document describes the implemented schema. [Provisioning and migrations](provisioning/README.md) and the [workflow guide](../power-automate/qstar-power-automate-flows.md) are the operational instructions. The standalone root JSX prototype is not the production data service.
+This document describes the implemented schema. [Provisioning and migrations](provisioning/README.md) and the [workflow guide](../power-automate/qstar-power-automate-flows.md) are the operational instructions. The historical files in `frontend/prototype/` are not the production data service.
 
 ## 1. Data flow
 
@@ -18,9 +18,9 @@ A note on **internal names**: SharePoint derives the internal name from the disp
 
 | App field (`issue.*`) | Display name | Internal name | SharePoint type | Notes |
 |---|---|---|---|---|
-| `qsNumber` | Qs Number | `QsNumber` | Number | Stable business reference shown as `QS-{n}`. New references use Config.ReferenceOffset + ID; preserve existing nonempty values. |
+| `qsNumber` | Qs Number | `QsNumber` | Number | Stable business reference shown as `QS-{n}`; see [reference allocation](provisioning/README.md#stable-qs-references). |
 | `id` | ID | `ID` | Number | SharePoint's own item ID; do not create — use the built-in. |
-| `shortSummary` | Short Summary | `ShortSummary` | Single line / multiline | One-line title. |
+| `shortSummary` | Short Summary | `ShortSummary` | [Provisioned field type](provisioning/provision-qstar.ps1) | One-line title; provisioning rejects an existing column with a different type. |
 | `description` | Description | `Description` | Multiline (plain) | |
 | `immediateAction` | Immediate Action taken | `ImmediateAction` | Multiline (plain) | |
 | `severity` | Severity | `Severity` | Choice | Critical / High / Medium / Low. Drives the default due date. |
@@ -67,8 +67,7 @@ These back the owner-assignment, escalation, §10.2 corrective-action and NC eff
 | `ownerUpdate` | Owner Update | `OwnerUpdate` | Choice (Yes/No) | Default `No`. UI acknowledgement flag for owner status updates. Progress comments are separate durable events. |
 | `ownerUpdateAt` | Owner Update At | `OwnerUpdateAt` | DateTime | UTC timestamp of the latest owner status update; notification identity must not depend on the badge Boolean. |
 | `ownerUpdateText` | Owner Update Text | `OwnerUpdateText` | Multiline (plain) | Short description of what the owner did (e.g. "Status changed from X to Y"). |
-
-| `reminderCycle` | Reminder Cycle | `ReminderCycle` | Single line text | Starts as `initial`; a new token on reopening permits a fresh reminder cycle. |
+| `reminderCycle` | Reminder Cycle | `ReminderCycle` | Single line text | See [Flow B's event identity](../power-automate/qstar-power-automate-flows.md#event-identity-and-delivery) for initial/empty values and reopened cycles. |
 
 > These operational columns (`ClosedAt`, `HoldReason`, `HoldUntil`, `OwnerUpdate`, `OwnerUpdateAt`, `OwnerUpdateText`, `PermissionedOwnerEmail`) are included in both provisioning scripts.
 
@@ -93,7 +92,7 @@ Rejected
 
 Entries use EntryText (required plain multiline), built-in Author and Created. EntryDate remains a compatibility column. Append uses SharePoint AddValidateUpdateItemUsingPath with the absolute issue-folder URL; the caller cannot override Author/Created. Existing root-level rows are migrated in place after preview, preserving item ID and author/time. Invalid or orphan parent mappings stop migration for review.
 
-In production, the list root grants Admin Full, QM **Q-Star Append Progress**, and Task Owners/Readers Read. Each issue folder adds only its current owner to Append. The custom role contains Read and Add Items without Edit/Delete/Manage Permissions. Folder inheritance protects child entries. Admins retain maintenance access; this is not an immutable compliance archive. Beta retains existing site permissions and therefore does not enforce append-only history.
+The [provisioning permission matrix](provisioning/README.md#journal-migration-and-production-permissions) owns root, folder, and entry access, including beta behavior and maintenance access. This is not an immutable compliance archive.
 
 ---
 
@@ -111,7 +110,7 @@ For reference when creating the choice columns (and when validating in the form/
 
 **Origin:** Customer Complaints or Claims, Internal Finding.
 
-**Region:** Americas (Miami), Asia Pacific, China (Shanghai), Eastern Europe (Vienna), Head Office (Neu-Isenburg), Western Europe (Amsterdam).
+**Region:** use the canonical choices and legacy aliases in [region-schema.json](provisioning/region-schema.json); follow the [reviewed migration procedure](provisioning/README.md#region-migration) for existing rows.
 
 **Department/Business Unit (and Escalation BU):** BU Aftermarket, BU Airlines, BU Automotive, BU Diplo & High Security, BU High Tech & SemiCon, BU Life Science, Central Europe & Commercial Services, Claims & Complaints, Customer Solution & Business Development, Digital Transformation & Data Management, Finance & Controlling, Human Resources, IT, Legal & Data Protection, Marketing, Network & Products, Quality, Risk Management, Strategy & Transformation, tmCT FRA, tmCT MUC, tmCT MEX/NLU, tmCT PVG. *(Extend to the full set used on your live form.)*
 
@@ -120,8 +119,9 @@ For reference when creating the choice columns (and when validating in the form/
 ## 4. Service behavior
 
 - Native Person reads expand identity fields. Writes resolve the tenant user and use lookup IDs; text-plus-email schemas are rejected by provisioning.
-- ReferenceOffset is a numeric Config field initialized once to at least the greatest legacy QsNumber (minimum 1000). Create the issue first, then use ReferenceOffset + its SharePoint ID. Preserve every nonempty old reference; do not recalculate the offset. A failed number-materialization write must resume the existing item, not repeat intake.
-- Config contains one settings item. SettingsJson holds non-secret runtime settings; ReferenceOffset is separate and immutable after first use. Production users can read Config; only Admins can write it.
+- Reference allocation and its immutable Config field are defined in [Stable QS references](provisioning/README.md#stable-qs-references). A failed number-materialization write must resume the existing item, not repeat intake.
+- Config contains one settings item. SettingsJson holds the Forms link and optional flow ID; retired connection and email-to-role values are discarded by `normalizeSettings`. Site/list targets and beta access mode come from web-part properties, not SettingsJson. Its access rules are in the [permission matrix](provisioning/README.md#journal-migration-and-production-permissions).
+- Issue editors submit changed fields with the ETag captured for their editing baseline. The service rejects missing/wildcard versions, preserves QS references, and reports HTTP 412 as `IssueConflictError`; it never substitutes a fresh version to force a stale draft through. An accepted update whose readback fails raises `IssueRefreshError` with `saved = true`. Accepted creates and appends instead return a result with `saveWarning` when a follow-up fails. User recovery actions are described in [the README](../../README.md#saving-and-recovering-drafts).
 - Progress appends target the issue folder and use the server-created item and identity. A successful comment needs no separate issue update. QMs/Admins may create a missing folder only when their SharePoint permissions permit; an owner with root Read waits for Flow C.
 - Date-only business values preserve their `yyyy-MM-dd` component. Event timestamps are UTC. Month addition clamps month ends; for example 31 December + two months is the last day of February.
 - Production role resolution controls presentation; SharePoint ACLs enforce access. SharePoint Edit is item-level, not column-level authorization. Reassignment is asynchronous; former access persists until Flow C successfully removes it.
@@ -129,9 +129,7 @@ For reference when creating the choice columns (and when validating in the form/
 
 ## 5. Notifications
 
-Use [Flow B](../power-automate/qstar-power-automate-flows.md#b--reminders-and-accepted-update-notifications) as the single workflow specification. It branches NC testing, On Hold, and normal active tasks before evaluating dates. Hold and testing suppress normal due/overdue notices. Missing branch dates create an operational alert instead of evaluating null date expressions.
-
-Dedupe includes event/cycle, milestone date, and the actual recipient. Accepted journal entries use their item ID. Owner status snapshots use OwnerUpdateAt and do not depend on the dismissible OwnerUpdate flag. A service-owned Pending/Sent log makes ambiguous send outcomes visible for reconciliation. The repository contains instructions, not exported or deployed flows.
+Use [Flow B](../power-automate/qstar-power-automate-flows.md#b--reminders-and-accepted-update-notifications) as the workflow specification for date branches, accepted-update events, delivery deduplication, and ambiguous-outcome reconciliation.
 
 ## 6. Deployment verification
 
