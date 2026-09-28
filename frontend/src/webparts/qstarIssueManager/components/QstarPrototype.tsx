@@ -1124,7 +1124,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   const [d, setD] = useState(issue);
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
-  const [closing, setClosing] = useState(false);
+  const busy = saving || issueBusy;
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const [holdOpen, setHoldOpen] = useState(false);
@@ -1132,6 +1132,11 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   useEffect(() => { setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setError(""); setNeedsReload(!issue.eTag); }, [issue.id]);
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
   const dirty = Object.keys(changedIssueFields(baseline, d)).length > 0;
+  useEffect(() => {
+    if (!issueBusy && !dirty && issue !== baseline) {
+      setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setNeedsReload(!issue.eTag);
+    }
+  }, [issue, issueBusy]);
   const nc = isNC(d);
   const testEnd = ncTestEnd(d);
   const inTest = inNCTest(d);
@@ -1140,7 +1145,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
 
   const acceptSaved = (saved) => { setD(saved); setBaseline(saved); setHadUpdate(saved.ownerUpdate); };
   const save = async (extra = {}) => {
-    if (saving || needsReload) return false;
+    if (busy || needsReload) return false;
     setSaving(true);
     setError("");
     try {
@@ -1148,14 +1153,13 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
       if (next.taskOwner && !next.taskOwnerEmail) throw new Error("Enter the task owner's Microsoft 365 email.");
       if (next.verifiedBy && !next.verifiedByEmail && !next.verifiedById) throw new Error("Enter the verifier's Microsoft 365 email.");
       const patch = buildIssueTransition(baseline, changedIssueFields(baseline, next));
-      setClosing(next.status === "Closed");
       acceptSaved(await onUpdate(issue.id, patch, baseline.eTag));
       return true;
     } catch (failure) {
       setError(failure);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
-    } finally { setSaving(false); setClosing(false); }
+    } finally { setSaving(false); }
   };
   const putOnHold = async (holdReason, holdUntil) => { if (await save({ status: "On Hold", holdReason, holdUntil })) setHoldOpen(false); };
   const startTest = () => save({ implementationDate: d.implementationDate || iso(today()), status: NC_TEST });
@@ -1171,7 +1175,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to register</button>
       <IssueSaveNotice error={error} />
-      {needsReload && <Btn disabled={saving} variant="ghost" onClick={reload}>Reload latest and discard draft</Btn>}
+      {needsReload && <Btn disabled={busy} variant="ghost" onClick={reload}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1199,15 +1203,15 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           <Card className="p-4">
             <SectionTitle icon={ClipboardList}>QM assessment</SectionTitle>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Status"><Select disabled={saving} value={d.status} onChange={(e) => set("status", e.target.value)} options={statusOptionsFor(d)} /></Field>
-              <Field label="Transformed into"><Select disabled={saving} value={d.transformedInto} onChange={(e) => set("transformedInto", e.target.value)} options={TRANSFORM_TYPES} /></Field>
-              <Field label="Task owner"><TextInput disabled={saving} value={d.taskOwner || ""} onChange={(e) => set("taskOwner", e.target.value)} placeholder="Full name" /></Field>
-              <Field label="Task owner Microsoft 365 email"><TextInput disabled={saving} type="email" value={d.taskOwnerEmail || ""} onChange={(e) => set("taskOwnerEmail", e.target.value)} placeholder="owner@company.com" /></Field>
-              <Field label="Escalation BU"><Select disabled={saving} value={d.ownerBU} onChange={(e) => set("ownerBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
-              <Field label="Due date" hint={`Default for ${d.severity}: ${SEVERITY_DUE_DAYS[d.severity]} days`}><TextInput disabled={saving} type="date" value={d.dueDate || ""} onChange={(e) => set("dueDate", e.target.value)} /></Field>
-              <Field label="Task created"><Select disabled={saving} value={d.taskCreated} onChange={(e) => set("taskCreated", e.target.value)} options={YESNO} /></Field>
+              <Field label="Status"><Select disabled={busy} value={d.status} onChange={(e) => set("status", e.target.value)} options={statusOptionsFor(d)} /></Field>
+              <Field label="Transformed into"><Select disabled={busy} value={d.transformedInto} onChange={(e) => set("transformedInto", e.target.value)} options={TRANSFORM_TYPES} /></Field>
+              <Field label="Task owner"><TextInput disabled={busy} value={d.taskOwner || ""} onChange={(e) => set("taskOwner", e.target.value)} placeholder="Full name" /></Field>
+              <Field label="Task owner Microsoft 365 email"><TextInput disabled={busy} type="email" value={d.taskOwnerEmail || ""} onChange={(e) => set("taskOwnerEmail", e.target.value)} placeholder="owner@company.com" /></Field>
+              <Field label="Escalation BU"><Select disabled={busy} value={d.ownerBU} onChange={(e) => set("ownerBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
+              <Field label="Due date" hint={`Default for ${d.severity}: ${SEVERITY_DUE_DAYS[d.severity]} days`}><TextInput disabled={busy} type="date" value={d.dueDate || ""} onChange={(e) => set("dueDate", e.target.value)} /></Field>
+              <Field label="Task created"><Select disabled={busy} value={d.taskCreated} onChange={(e) => set("taskCreated", e.target.value)} options={YESNO} /></Field>
             </div>
-            <div className="mt-3"><Field label="Follow up (Quality Team notes)"><TextArea disabled={saving} value={d.followUp} onChange={(e) => set("followUp", e.target.value)} /></Field></div>
+            <div className="mt-3"><Field label="Follow up (Quality Team notes)"><TextArea disabled={busy} value={d.followUp} onChange={(e) => set("followUp", e.target.value)} /></Field></div>
             {d.status === "Closed" && (d.closedAt || d.closedDate) && (
               <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200">
                 <CheckCircle2 size={15} />Closed on {d.closedAt ? fmtDateTime(d.closedAt) : fmtDate(d.closedDate)}
@@ -1219,36 +1223,36 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             <Card className="border-violet-200 p-4">
               <SectionTitle icon={ShieldCheck}><span className="text-violet-700">Corrective action — ISO 9001 §10.2</span></SectionTitle>
               <div className="space-y-3">
-                <Field label="Root cause"><TextArea disabled={saving} value={d.rootCause} onChange={(e) => set("rootCause", e.target.value)} placeholder="Why did this happen? (5 Whys / Ishikawa)" /></Field>
-                <Field label="Corrective action taken"><TextArea disabled={saving} value={d.correctiveAction} onChange={(e) => set("correctiveAction", e.target.value)} /></Field>
+                <Field label="Root cause"><TextArea disabled={busy} value={d.rootCause} onChange={(e) => set("rootCause", e.target.value)} placeholder="Why did this happen? (5 Whys / Ishikawa)" /></Field>
+                <Field label="Corrective action taken"><TextArea disabled={busy} value={d.correctiveAction} onChange={(e) => set("correctiveAction", e.target.value)} /></Field>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Implementation date"><TextInput disabled={saving} type="date" value={d.implementationDate || ""} onChange={(e) => set("implementationDate", e.target.value)} /></Field>
-                  <Field label="Verified by"><TextInput disabled={saving} value={d.verifiedBy || ""} onChange={(e) => set("verifiedBy", e.target.value)} placeholder="Full name" /></Field>
-                  <Field label="Verifier Microsoft 365 email"><TextInput disabled={saving} type="email" value={d.verifiedByEmail || ""} onChange={(e) => set("verifiedByEmail", e.target.value)} placeholder="verifier@company.com" /></Field>
+                  <Field label="Implementation date"><TextInput disabled={busy} type="date" value={d.implementationDate || ""} onChange={(e) => set("implementationDate", e.target.value)} /></Field>
+                  <Field label="Verified by"><TextInput disabled={busy} value={d.verifiedBy || ""} onChange={(e) => set("verifiedBy", e.target.value)} placeholder="Full name" /></Field>
+                  <Field label="Verifier Microsoft 365 email"><TextInput disabled={busy} type="email" value={d.verifiedByEmail || ""} onChange={(e) => set("verifiedByEmail", e.target.value)} placeholder="verifier@company.com" /></Field>
                 </div>
-                <Field label="Effectiveness check"><TextArea disabled={saving} value={d.effectivenessCheck} onChange={(e) => set("effectivenessCheck", e.target.value)} placeholder="Evidence the action worked and the issue has not recurred." /></Field>
-                {d.verifiedBy && <Field label="Verification date"><TextInput disabled={saving} type="date" value={d.verifiedDate || ""} onChange={(e) => set("verifiedDate", e.target.value)} /></Field>}
+                <Field label="Effectiveness check"><TextArea disabled={busy} value={d.effectivenessCheck} onChange={(e) => set("effectivenessCheck", e.target.value)} placeholder="Evidence the action worked and the issue has not recurred." /></Field>
+                {d.verifiedBy && <Field label="Verification date"><TextInput disabled={busy} type="date" value={d.verifiedDate || ""} onChange={(e) => set("verifiedDate", e.target.value)} /></Field>}
               </div>
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={closing} author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
           <Card className="p-4">
             <SectionTitle icon={CheckCircle2}>Actions</SectionTitle>
             <div className="flex flex-col gap-2">
-              <Btn onClick={() => save()} disabled={!dirty || saving || needsReload || (issueBusy && d.status === "Closed")}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save changes"}</Btn>
+              <Btn onClick={() => save()} disabled={!dirty || busy || needsReload}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save changes"}</Btn>
               {nc && !inTest && d.status !== "Closed" && (
-                <Btn variant="primary" disabled={saving || needsReload} onClick={startTest} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Start {NC_TEST_MONTHS}-month effectiveness test</Btn>
+                <Btn variant="primary" disabled={busy || needsReload} onClick={startTest} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Start {NC_TEST_MONTHS}-month effectiveness test</Btn>
               )}
-              <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>
-              <Btn variant="primary" onClick={close} disabled={saving || needsReload || issueBusy || (nc && !testDone)} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
-              <Btn variant="danger" disabled={saving || needsReload} onClick={() => save({ status: "Rejected", taskCreated: "No" })}><XCircle size={15} />Reject issue</Btn>
-              {hadUpdate && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => save({ ownerUpdate: false })}>Acknowledge owner update</Btn>}
+              <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>
+              <Btn variant="primary" onClick={close} disabled={busy || needsReload || (nc && !testDone)} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
+              <Btn variant="danger" disabled={busy || needsReload} onClick={() => save({ status: "Rejected", taskCreated: "No" })}><XCircle size={15} />Reject issue</Btn>
+              {hadUpdate && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => save({ ownerUpdate: false })}>Acknowledge owner update</Btn>}
             </div>
-            {issueBusy && !saving && <p className="mt-2 text-xs text-slate-500">Wait for this issue's pending work to finish before closing.</p>}
+            {issueBusy && !saving && <p className="mt-2 text-xs text-slate-500">Wait for this issue's pending work to finish before editing.</p>}
             {nc && !testDone && d.status !== "Closed" && <p className="mt-2 text-xs text-cyan-700">{inTest ? `Closure unlocks when the test ends (${fmtDate(testEnd)}).` : "Closure unlocks after the effectiveness test completes."}</p>}
             {dirty && <p className="mt-2 text-xs text-amber-600">Unsaved changes.</p>}
           </Card>
@@ -1269,7 +1273,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           </Card>
         </div>
       </div>
-      <HoldDialog saving={saving} needsReload={needsReload} open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -1301,13 +1305,14 @@ function TriageQueue({ issues, onOpen }) {
   );
 }
 
-export function TriageForm({ issue, onBack, onTriage, onReload }) {
+export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = false }) {
   const [saving, setSaving] = useState(false);
+  const busy = saving || issueBusy;
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const baseline = useRef(issue);
   const persist = async (patch) => {
-    if (saving || needsReload) return;
+    if (busy || needsReload) return;
     setSaving(true); setError("");
     try { await onTriage(issue.id, patch, baseline.current.eTag); }
     catch (failure) {
@@ -1327,6 +1332,14 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
   const [ownerBU, setBU] = useState(issue.departmentBU);
   const [dueDate, setDue] = useState(addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity]));
   const [followUp, setFollow] = useState("");
+  const dirty = transformedInto !== "OFI" || taskOwner || taskOwnerEmail || followUp ||
+    ownerBU !== baseline.current.departmentBU || dueDate !== addDays(baseline.current.reportDate, SEVERITY_DUE_DAYS[baseline.current.severity]);
+  useEffect(() => {
+    if (!issueBusy && !dirty && issue !== baseline.current) {
+      baseline.current = issue;
+      setBU(issue.departmentBU); setDue(addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity])); setNeedsReload(!issue.eTag);
+    }
+  }, [issue, issueBusy]);
   const nc = transformedInto === "NC Minor" || transformedInto === "NC Major";
 
   const create = () => {
@@ -1339,23 +1352,23 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to triage queue</button>
       <IssueSaveNotice error={error} />
-      {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and return to queue</Btn>}
+      {needsReload && <Btn onClick={reload} disabled={busy}>Reload latest and return to queue</Btn>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <div className="lg:col-span-3"><IntakeSummary i={issue} /></div>
         <div className="lg:col-span-2">
           <Card className="p-4">
             <SectionTitle icon={ClipboardList}>Assess & decide</SectionTitle>
             <div className="space-y-3">
-              <Field label="Transform into"><Select disabled={saving} value={transformedInto} onChange={(e) => setT(e.target.value)} options={TRANSFORM_TYPES} /></Field>
+              <Field label="Transform into"><Select disabled={busy} value={transformedInto} onChange={(e) => setT(e.target.value)} options={TRANSFORM_TYPES} /></Field>
               {nc && <p className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-700">Nonconformity selected — §10.2 corrective-action fields will open on the issue once created.</p>}
-              <Field label="Task owner (gets reminders)"><TextInput disabled={saving} value={taskOwner} onChange={(e) => setOwner(e.target.value)} placeholder="Full name" /></Field>
-              <Field label="Task owner Microsoft 365 email"><TextInput disabled={saving} type="email" value={taskOwnerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@company.com" /></Field>
-              <Field label="Escalation BU"><Select disabled={saving} value={ownerBU} onChange={(e) => setBU(e.target.value)} options={BUSINESS_UNITS} /></Field>
-              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput disabled={saving} type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
-              <Field label="Follow up note (optional)"><TextArea disabled={saving} value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
+              <Field label="Task owner (gets reminders)"><TextInput disabled={busy} value={taskOwner} onChange={(e) => setOwner(e.target.value)} placeholder="Full name" /></Field>
+              <Field label="Task owner Microsoft 365 email"><TextInput disabled={busy} type="email" value={taskOwnerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@company.com" /></Field>
+              <Field label="Escalation BU"><Select disabled={busy} value={ownerBU} onChange={(e) => setBU(e.target.value)} options={BUSINESS_UNITS} /></Field>
+              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput disabled={busy} type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
+              <Field label="Follow up note (optional)"><TextArea disabled={busy} value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
               <div className="flex flex-col gap-2 pt-1">
-                <Btn onClick={create} disabled={saving || needsReload}><CheckCircle2 size={15} />Create issue</Btn>
-                <Btn variant="danger" onClick={reject} disabled={saving || needsReload}><XCircle size={15} />Reject (no action)</Btn>
+                <Btn onClick={create} disabled={busy || needsReload}><CheckCircle2 size={15} />Create issue</Btn>
+                <Btn variant="danger" onClick={reject} disabled={busy || needsReload}><XCircle size={15} />Reject (no action)</Btn>
               </div>
             </div>
           </Card>
@@ -1539,7 +1552,7 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
 /* ============================================================
    Read-only issue detail (Owner viewing others' issues)
    ============================================================ */
-function ReadOnlyIssueDetail({ issue, onBack, onReopen }) {
+function ReadOnlyIssueDetail({ issue, onBack, onReopen, issueBusy = false }) {
   const closed = issue.status === "Closed";
   return (
     <div className="space-y-4">
@@ -1561,7 +1574,7 @@ function ReadOnlyIssueDetail({ issue, onBack, onReopen }) {
               <RefreshCw size={16} className="mt-0.5 shrink-0" />
               <span><strong>This issue is closed.</strong> The full record and history below are read-only. Re-opening restarts the corrective-action cycle — status returns to In Progress and effectiveness must be verified again before it can be closed.</span>
             </div>
-            <Btn variant="primary" onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
+            <Btn variant="primary" disabled={issueBusy} onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
           </div>
         </Card>
       )}
@@ -1665,18 +1678,25 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload }) {
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false }) {
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
+  const busy = saving || issueBusy;
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const [status, setStatus] = useState(issue.status);
   const [impl, setImpl] = useState(issue.implementationDate || "");
   const [holdOpen, setHoldOpen] = useState(false);
   useEffect(() => { setBaseline(issue); setStatus(issue.status); setImpl(issue.implementationDate || ""); setNeedsReload(!issue.eTag); setError(""); }, [issue.id]);
+  const dirty = status !== baseline.status || impl !== (baseline.implementationDate || "");
+  useEffect(() => {
+    if (!issueBusy && !dirty && issue !== baseline) {
+      setBaseline(issue); setStatus(issue.status); setImpl(issue.implementationDate || ""); setNeedsReload(!issue.eTag);
+    }
+  }, [issue, issueBusy]);
   const accept = (saved) => { setBaseline(saved); setStatus(saved.status); setImpl(saved.implementationDate || ""); };
   const persist = async (patch) => {
-    if (saving || needsReload) return false;
+    if (busy || needsReload) return false;
     setSaving(true); setError("");
     try { accept(await onUpdate(issue.id, buildIssueTransition(baseline, patch), baseline.eTag)); return true; }
     catch (failure) {
@@ -1701,7 +1721,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to my tasks</button>
       <IssueSaveNotice error={error} />
-      {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and discard draft</Btn>}
+      {needsReload && <Btn onClick={reload} disabled={busy}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1729,7 +1749,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               {issue.followUp && <ReadRow label="QM follow-up note" value={<span className="whitespace-pre-wrap">{issue.followUp}</span>} />}
             </dl>
           </Card>
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd author={owner} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={owner} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
         </div>
 
         <div className="lg:col-span-2">
@@ -1741,25 +1761,25 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : nc ? (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={saving} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
-                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={saving} type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
-                <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
-                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
-                <Btn variant="primary" disabled={saving || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
+                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={busy} type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
+                <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
+                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
+                <Btn variant="primary" disabled={busy || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
                 <p className="text-xs text-slate-400">Marking the mitigation as implemented moves this NC into the {NC_TEST_MONTHS}-month effectiveness test. It can only be closed by the QM afterwards.</p>
               </div>
             ) : (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={saving} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
-                <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
-                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
+                <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
+                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <p className="text-xs text-slate-400">Closing and effectiveness verification are done by the Quality Team. Add a progress note to let them know when you're ready.</p>
               </div>
             )}
           </Card>
         </div>
       </div>
-      <HoldDialog saving={saving} needsReload={needsReload} open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -2023,18 +2043,19 @@ export default function App({
   let body;
   if (current) {
     const isClosed = current.status === "Closed";
+    const issueBusy = busyIssueIds.includes(current.id);
     if (profile === "reader") {
       body = <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (profile === "owner") {
       body = (!isClosed && ownsCurrent)
-        ? <OwnerIssueDetail issue={current} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={reloadIssue} onAddProgress={ownerAddProgress} />
+        ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={reloadIssue} onAddProgress={ownerAddProgress} />
         : <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (isClosed) {
-      body = <ReadOnlyIssueDetail issue={current} onBack={back} onReopen={() => reopen(current.id)} />;
+      body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail issue={current} issueBusy={busyIssueIds.includes(current.id)} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
-        : <TriageForm issue={current} onBack={back} onTriage={triage} onReload={reloadIssue} />;
+        ? <QMIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
+        : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;

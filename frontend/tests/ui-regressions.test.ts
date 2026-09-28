@@ -76,6 +76,7 @@ function field(label: string): HTMLInputElement | HTMLSelectElement | HTMLTextAr
 }
 
 function change(label: string, value: string): void {
+  assert.equal(field(label).disabled, false, `Field ${label} should be enabled`);
   act(() => { Simulate.change(field(label), { target: { value } } as never); });
 }
 
@@ -120,17 +121,18 @@ function fillReport(): void {
   change("Where does it come from? *", "Internal Finding");
 }
 
-test("QM locks its draft during a save while the independent progress form stays editable", async () => {
+test("QM locks its detail and progress forms during a save and retains both drafts", async () => {
   const pending = deferred<IIssue>();
   let writes = 0;
   render(QMIssueDetail, qmProps({ issue: issue({ verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com" }), onUpdate: () => { writes += 1; return pending.promise; } }));
   change("Follow up (Quality Team notes)", "Submitted note");
+  writeProgress("Independent progress draft");
   await click("Save changes");
   assertFieldsDisabled(true);
   const progress = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
   assert.ok(progress);
-  assert.equal(progress.disabled, false);
-  act(() => { Simulate.change(progress, { target: { value: "Independent progress draft" } } as never); button("Saving…").click(); });
+  assert.equal(progress.disabled, true);
+  act(() => { button("Saving…").click(); });
   await act(async () => { pending.resolve(issue({ followUp: "Submitted note", eTag: '"2"' })); });
   assertFieldsDisabled(false);
   assert.equal(field("Follow up (Quality Team notes)").value, "Submitted note");
@@ -140,7 +142,7 @@ test("QM locks its draft during a save while the independent progress form stays
 });
 
 for (const transformedInto of ["NC Minor", "OFI"] as const) {
-  test(`owner ${transformedInto} form locks only its task fields during submission`, async () => {
+  test(`owner ${transformedInto} form locks task fields and progress during submission`, async () => {
     const pending = deferred<IIssue>();
     const original = issue({ transformedInto, status: "Created" });
     render(OwnerIssueDetail, { issue: original, owner: "Owner", onBack: () => undefined, onAddProgress: async () => undefined, onUpdate: () => pending.promise });
@@ -148,7 +150,7 @@ for (const transformedInto of ["NC Minor", "OFI"] as const) {
     if (transformedInto === "NC Minor") change("Implementation date", todayDate());
     await click(transformedInto === "NC Minor" ? "Save progress" : "Save");
     assertFieldsDisabled(true);
-    assert.equal(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled, false);
+    assert.equal(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled, true);
     await act(async () => { pending.resolve({ ...original, status: "In Progress", implementationDate: todayDate(), eTag: '"2"' }); });
     assertFieldsDisabled(false);
     assert.equal(field("Status").value, "In Progress");
@@ -204,20 +206,24 @@ test("settings lock link edits during save while diagnostics remain available", 
   assert.equal(button("Save settings").disabled, true);
 });
 
-test("a pending append locks its text without locking the QM draft", async () => {
-  const pending = deferred<void>();
+test("a pending append locks the issue while retaining its unsaved QM draft", async () => {
+  const pending = deferred<IProgressLogEntry>();
   let appends = 0;
-  render(QMIssueDetail, qmProps({ onUpdate: async () => issue(), onAddProgress: () => { appends += 1; return pending.promise; } }));
+  await renderApp({ addProgressLogEntry: () => { appends += 1; return pending.promise; } });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Independent QM draft");
   const progress = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
   assert.ok(progress);
   act(() => { Simulate.change(progress, { target: { value: "Completed mitigation" } } as never); });
   await click("Add update");
   assert.equal(progress.disabled, true);
-  assertFieldsDisabled(false);
-  change("Follow up (Quality Team notes)", "Independent QM draft");
+  assertFieldsDisabled(true);
+  assert.equal(button("Save changes").disabled, true);
   act(() => { button("Saving…").click(); });
-  await act(async () => { pending.resolve(); });
+  await act(async () => { pending.resolve({ text: "Completed mitigation", author: "Quality Manager", ts: new Date().toISOString() }); });
   assert.equal(progress.disabled, false);
+  assertFieldsDisabled(false);
   assert.equal(progress.value, "");
   assert.equal(field("Follow up (Quality Team notes)").value, "Independent QM draft");
   assert.equal(appends, 1);
@@ -469,7 +475,7 @@ for (const component of [QMIssueDetail, OwnerIssueDetail, TriageForm]) {
   });
 }
 
-async function renderApp(overrides: object = {}, initial: IIssue[] = [issue()]): Promise<void> {
+async function renderApp(overrides: object = {}, initial: IIssue[] = [issue()], props: object = {}): Promise<void> {
   const dataService = {
     loadIssues: async () => initial,
     loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }),
@@ -481,7 +487,7 @@ async function renderApp(overrides: object = {}, initial: IIssue[] = [issue()]):
     ...overrides,
   };
   await act(async () => {
-    ReactDOM.render(React.createElement(App, { dataService, profile: "admin", userDisplayName: "Quality Manager", userEmail: "qm@example.com", developmentMode: false, onRunDiagnostics: async () => [] }), container);
+    ReactDOM.render(React.createElement(App, { dataService, profile: "admin", userDisplayName: "Quality Manager", userEmail: "qm@example.com", developmentMode: false, onRunDiagnostics: async () => [], ...props }), container);
   });
 }
 
@@ -693,8 +699,14 @@ for (const first of ["update", "append"] as const) {
       change("Follow up (Quality Team notes)", "Saved independently of the journal");
       writeProgress(initialEntry.text);
       const second = first === "update" ? "append" : "update";
-      await click(first === "update" ? "Save changes" : "Add update");
-      await click(second === "update" ? "Save changes" : "Add update");
+      const update = button("Save changes");
+      const append = button("Add update");
+      await act(async () => {
+        Simulate.click(first === "update" ? update : append);
+        Simulate.click(second === "update" ? update : append);
+      });
+      assertFieldsDisabled(true);
+      assert.equal(progressInput().disabled, true);
       await act(async () => { gates[second].resolve(); });
       await act(async () => { gates[first].resolve(); });
       assert.deepEqual(journalText(), [initialEntry.text, initialEntry.text]);
@@ -717,9 +729,8 @@ test("a queued append proceeds after an issue save fails without discarding eith
   await click("Issue register");
   await openIssue();
   change("Follow up (Quality Team notes)", "Retain this rejected draft");
-  await click("Save changes");
   writeProgress("An independent accepted observation");
-  await click("Add update");
+  await act(async () => { Simulate.click(button("Save changes")); Simulate.click(button("Add update")); });
   assert.deepEqual(calls, ["update"]);
   await act(async () => { pending.reject(new Error("Issue write rejected")); });
   assert.deepEqual(calls, ["update", "append"]);
@@ -791,8 +802,8 @@ for (const transformedInto of ["OFI", "NC Minor"] as const) {
       await click("Issue register");
       await openIssue();
       writeProgress("Closure evidence that must not be lost");
-      await click("Add update");
       if (action === "Save changes") change("Status", "Closed");
+      await click("Add update");
       assert.equal(button(action).disabled, true);
       await act(async () => { button(action).click(); });
       assert.equal(closures, 0);
@@ -881,7 +892,7 @@ for (const transformedInto of ["OFI", "NC Minor"] as const) {
         assert.match(container.querySelector('[role="alert"]')?.textContent || "", /pending work.*Try closing again/);
         await act(async () => { failedAppend.reject(new Error("Journal append rejected")); });
         assert.equal(closures, 0);
-        assert.equal(progressInput().disabled, false);
+        assert.equal(progressInput().disabled, true);
         assert.equal(progressInput().value, "Rejected note preserved through reloads");
         assert.match(container.querySelector('p[role="alert"]')?.textContent || "", /Journal append rejected/);
         for (let i = 0; i < reloadCount; i++) {
@@ -893,6 +904,7 @@ for (const transformedInto of ["OFI", "NC Minor"] as const) {
           assert.equal(progressInput().value, "Rejected note preserved through reloads");
           assert.match(container.querySelector('p[role="alert"]')?.textContent || "", /Journal append rejected/);
         }
+        assert.equal(progressInput().disabled, false);
         assert.equal(button(action).disabled, false);
         assert.deepEqual(journalText(), ["Accepted observation"]);
         await click("Add update");
@@ -934,9 +946,10 @@ test("reload and append use the same issue queue so a stale read cannot erase an
   await openIssue();
   writeProgress("First accepted observation");
   await click("Add update");
-  await click("Reload saved issue");
   writeProgress("Second accepted observation");
-  await click("Add update");
+  await act(async () => { Simulate.click(button("Reload saved issue")); Simulate.click(button("Add update")); });
+  assertFieldsDisabled(true);
+  assert.equal(progressInput().disabled, true);
   await act(async () => { pendingRead.resolve(); });
   assert.deepEqual(calls, ["append", "reload", "append"]);
   assert.deepEqual(journalText().sort(), ["First accepted observation", "Second accepted observation"]);
@@ -961,6 +974,8 @@ test("operations for another issue remain independent of a pending save", async 
   const secondRow = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent?.includes("QS-1002"));
   assert.ok(secondRow);
   await act(async () => { Simulate.click(secondRow); });
+  assertFieldsDisabled(false);
+  assert.equal(progressInput().disabled, false);
   change("Follow up (Quality Team notes)", "Second issue note");
   await click("Save changes");
   assert.deepEqual(writes, [1, 2]);
@@ -992,4 +1007,190 @@ test("closing another issue is allowed while an unrelated issue has pending work
   assert.equal(button("Re-open issue").disabled, false);
   await act(async () => { pending.resolve(); });
   assert.equal(button("Re-open issue").disabled, false);
+});
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    for (const fails of [false, true]) {
+      test(`${transformedInto} ${action} stays locked across remount until ${fails ? "rejection and explicit retry" : "accepted closure"}`, async () => {
+        let stored = issue({
+          transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+          implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+        });
+        const pending = deferred<void>();
+        let writes = 0;
+        let appends = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes += 1;
+            assert.equal(patch.status, "Closed");
+            assert.equal(eTag, '"1"');
+            if (writes === 1) await pending.promise;
+            stored = { ...stored, ...patch, eTag: '"2"' };
+            return stored;
+          },
+          addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return entry; },
+        }, [stored]);
+        await click("Issue register");
+        await openIssue();
+        if (action === "Save changes") change("Status", "Closed");
+        await click(action);
+        await click("Back to register");
+        await openIssue();
+        assertFieldsDisabled(true);
+        assert.equal(progressInput().disabled, true);
+        for (const label of ["Save changes", "Verify & close", "Put on hold", "Reject issue", "Add update"]) {
+          assert.equal(button(label).disabled, true);
+          act(() => { button(label).click(); });
+        }
+        assert.equal(writes, 1);
+        assert.equal(appends, 0);
+        assert.equal(progressInput().value, "");
+        if (fails) {
+          await act(async () => { pending.reject(new Error("Closure rejected after remount")); });
+          assertFieldsDisabled(false);
+          assert.equal(progressInput().disabled, false);
+          assert.notEqual(stored.status, "Closed");
+          assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Closure rejected after remount/);
+          if (action === "Save changes") change("Status", "Closed");
+          await click(action);
+        } else {
+          await act(async () => { pending.resolve(); });
+        }
+        assert.equal(writes, fails ? 2 : 1);
+        assert.equal(appends, 0);
+        assert.equal(container.querySelector("textarea"), null);
+        assert.equal(container.querySelector('[role="alert"]'), null);
+        assert.equal(button("Re-open issue").disabled, false);
+        assert.equal(stored.status, "Closed");
+      });
+    }
+  }
+}
+
+for (const profile of ["qm", "owner"] as const) {
+  const identity = { profile, userDisplayName: "Owner", userEmail: "owner@example.com" };
+  const back = profile === "owner" ? "Back to my tasks" : "Back to register";
+  const label = profile === "owner" ? "Status" : "Follow up (Quality Team notes)";
+  const submit = profile === "owner" ? "Save" : "Save changes";
+
+  test(`${profile} remounted during a non-closing save resumes with the accepted fields and ETag`, async () => {
+    let stored = issue({ transformedInto: "OFI", status: "Created", followUp: "Original note" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) await pending.promise;
+      stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+      return stored;
+    } }, [stored], identity);
+    await click("Issue register");
+    await openIssue();
+    change(label, profile === "owner" ? "In Progress" : "Accepted note");
+    await click(submit);
+    await click(back);
+    await openIssue();
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    assert.equal(field(label).value, profile === "owner" ? "Created" : "Original note");
+    await act(async () => { pending.resolve(); });
+    assertFieldsDisabled(false);
+    assert.equal(progressInput().disabled, false);
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Accepted note");
+    assert.equal(button(submit).disabled, true);
+    change(label, profile === "owner" ? "Created" : "Next note");
+    await click(submit);
+    assert.deepEqual(writes.map(write => write.eTag), ['"1"', '"2"']);
+    if (profile === "qm") assert.deepEqual(writes[1].patch, { followUp: "Next note" });
+    else assert.equal(writes[1].patch.status, "Created");
+    assert.equal(container.querySelector('[role="alert"]'), null);
+  });
+
+  test(`${profile} remounted during an append keeps all issue controls locked`, async () => {
+    const pending = deferred<IProgressLogEntry>();
+    const entry = { id: 31, text: "Accepted before navigation", author: "Owner", ts: new Date().toISOString() };
+    let appends = 0;
+    await renderApp({ addProgressLogEntry: () => { appends += 1; return pending.promise; } }, [issue()], identity);
+    await click("Issue register");
+    await openIssue();
+    writeProgress(entry.text);
+    await click("Add update");
+    await click(back);
+    await openIssue();
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    await act(async () => { pending.resolve(entry); });
+    assertFieldsDisabled(false);
+    assert.equal(progressInput().disabled, false);
+    assert.deepEqual(journalText(), [entry.text]);
+    assert.equal(appends, 1);
+  });
+
+  test(`${profile} retains genuine edits and their original ETag when reload brings a newer snapshot`, async () => {
+    const original = issue({ transformedInto: "OFI", status: "Created", followUp: "Original note" });
+    const entry = { id: 32, text: "Accepted observation", author: "Owner", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+    const latest = { ...original, followUp: "Another manager's note", progressLog: [entry], eTag: '"2"' };
+    const pending = deferred<IIssue>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    let reads = 0;
+    await renderApp({
+      addProgressLogEntry: async () => entry,
+      getIssue: async () => { reads += 1; return reads === 1 ? pending.promise : latest; },
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => { writes.push({ patch, eTag }); throw new IssueConflictError(1, latest); },
+    }, [original], identity);
+    await click("Issue register");
+    await openIssue();
+    writeProgress(entry.text);
+    await click("Add update");
+    change(label, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    writeProgress("Unsubmitted journal draft");
+    await click("Reload saved issue");
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    await act(async () => { pending.resolve(latest); });
+    assertFieldsDisabled(false);
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    assert.equal(progressInput().value, "Unsubmitted journal draft");
+    assert.equal(progressInput().disabled, false);
+    await click(submit);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].eTag, '"1"');
+    if (profile === "qm") assert.deepEqual(writes[0].patch, { followUp: "Genuine unsaved note" });
+    else assert.equal(writes[0].patch.status, "In Progress");
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    assert.match(container.textContent || "", /Your draft has been kept/);
+    await click("Reload latest and discard draft");
+    assert.equal(field(label).value, profile === "owner" ? "Created" : "Another manager's note");
+    assert.equal(progressInput().value, "Unsubmitted journal draft");
+  });
+}
+
+test("triage remounted during an accepted write requires recovery before another submission", async () => {
+  const pending = deferred<IIssue>();
+  const original = issue({ triaged: false, status: undefined });
+  let writes = 0;
+  await renderApp({
+    updateIssue: () => { writes += 1; return pending.promise; },
+    getIssue: async () => ({ ...original, triaged: true, status: "Created", eTag: '"2"' }),
+  }, [original]);
+  await click("Triage queue1");
+  await openIssue();
+  change("Task owner (gets reminders)", "Owner");
+  change("Task owner Microsoft 365 email", "owner@example.com");
+  await click("Create issue");
+  await click("Back to triage queue");
+  await openIssue();
+  assertFieldsDisabled(true);
+  assert.equal(button("Create issue").disabled, true);
+  assert.equal(button("Reject (no action)").disabled, true);
+  await act(async () => { pending.reject(new IssueRefreshError(original.id)); });
+  assertSavedWarning();
+  assert.equal(button("Create issue").disabled, true);
+  await click("Reload latest and return to queue");
+  await click("Issue register");
+  await openIssue();
+  assertFieldsDisabled(false);
+  assert.equal(field("Status").value, "Created");
+  assert.equal(writes, 1);
 });
