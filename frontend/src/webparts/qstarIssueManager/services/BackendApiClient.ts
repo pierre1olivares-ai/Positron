@@ -1,6 +1,7 @@
 import type { WebPartContext } from "@microsoft/sp-webpart-base";
 import { AadHttpClient } from "@microsoft/sp-http";
 import { IResolvedRole, Role } from "../models/IRole";
+import { positiveId } from "./sharePointValues";
 
 export interface IBackendResponse {
   ok: boolean;
@@ -82,8 +83,4 @@ export function parseBackendSession(value: unknown, baseUrl: string): IResolvedR
       betaAccessMode: connection.betaAccessMode, dataSourceMode: "backend", backendBaseUrl: baseUrl,
     },
   };
-}
-
-export function positiveId(value: unknown): value is number {
-  return typeof value === "number" && isFinite(value) && value > 0 && value <= 9007199254740991 && Math.floor(value) === value;
 }

@@ -3,6 +3,7 @@ import { after, afterEach, beforeEach, test } from "node:test";
 import type { IIssue, IProgressLogEntry } from "../src/webparts/qstarIssueManager/models/IIssue";
 import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
 import { addCalendarDays, todayDate } from "../src/webparts/qstarIssueManager/domain/calendarDates";
+import { sharePointHttpHarness } from "./sharepoint-http-harness";
 
 const { JSDOM } = require("jsdom");
 const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
@@ -1911,16 +1912,21 @@ function acceptedBackendHarness(operation: "create" | "progress", headers = fals
   return { state, props };
 }
 
-test("malformed accepted create consumes only the submitted form and blocks resubmit across navigation/remount until successful recovery", async () => {
-  const { state, props } = acceptedBackendHarness("create");
+for (const headers of [false, true]) {
+test(`malformed accepted create ${headers ? "with" : "without"} headers blocks resubmit across navigation/remount until successful recovery`, async () => {
+  const { state, props } = acceptedBackendHarness("create", headers);
   await renderApp({}, [], props);
   await click("Report"); fillReport(); await click("Submit report");
   assert.equal(state.writes.length, 1); assert.equal(field("Short summary *").value, "");
+  assert.equal(field("Short summary *").disabled, true);
   assert.equal(button("Submit report").disabled, true); assert.match(container.textContent || "", /submission was saved/);
   assert.doesNotMatch(container.textContent || "", /change failed and was not saved/);
   await click("Issue register"); await click("Report"); assert.equal(button("Submit report").disabled, true);
   act(() => { ReactDOM.unmountComponentAtNode(container); });
   await renderApp({}, [], props); await click("Report"); assert.equal(button("Submit report").disabled, true);
+  const receipts = JSON.parse(window.sessionStorage.getItem(`qstar-accepted:${JSON.stringify([props.connection, "qm@example.com"])}`)!);
+  assert.equal(receipts.create.issueId, headers ? 21 : undefined);
+  assert.equal(receipts.create.qsNumber, headers ? 3021 : undefined);
   state.failReload = true; await click("Reload saved data"); assert.equal(button("Submit report").disabled, true);
   state.failReload = false; await click("Reload saved data");
   assert.equal(field("Short summary *").value, ""); assert.equal(button("Submit report").disabled, true);
@@ -1928,37 +1934,30 @@ test("malformed accepted create consumes only the submitted form and blocks resu
   assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.shortSummary, "Deliberate new report");
 });
 
-test("malformed accepted progress survives issue reopen/remount, preserves unrelated detail and needs fresh text after recovery", async () => {
-  const { state, props } = acceptedBackendHarness("progress");
+test(`malformed accepted progress ${headers ? "with" : "without"} headers survives remount and preserves unrelated detail through recovery`, async () => {
+  const { state, props } = acceptedBackendHarness("progress", headers);
   await renderApp({}, [], props); await click("Issue register"); await openIssue();
   change("Follow up (Quality Team notes)", "Unsubmitted independent detail");
   writeProgress("Accepted observation"); await click("Add update");
   assert.equal(state.writes.length, 1); assert.equal(button("Add update").disabled, true);
+  assert.equal(progressInput().disabled, true);
   assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted independent detail");
   await click("Back to register"); await openIssue(); assert.equal(button("Add update").disabled, true);
   act(() => { ReactDOM.unmountComponentAtNode(container); });
   await renderApp({}, [], props); await click("Issue register"); await openIssue(); assert.equal(button("Add update").disabled, true);
+  assert.equal(progressInput().disabled, true);
+  const receipts = JSON.parse(window.sessionStorage.getItem(`qstar-accepted:${JSON.stringify([props.connection, "qm@example.com"])}`)!);
+  assert.equal(receipts["progress:1"].issueId, 1);
+  assert.equal(receipts["progress:1"].entryId, headers ? 71 : undefined);
   state.failReload = true; await click("Reload saved data"); assert.equal(button("Add update").disabled, true);
   state.failReload = false; await click("Reload saved data");
+  assert.equal(progressInput().disabled, false);
   const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
   assert.equal(textarea.value, ""); assert.equal(button("Add update").disabled, true);
   writeProgress("Deliberate fresh observation"); await click("Add update");
   assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.text, "Deliberate fresh observation");
 });
-
-test("201 malformed bodies with receipt headers show saved warnings and consume submitted form/note", async () => {
-  const created = acceptedBackendHarness("create", true);
-  await renderApp({}, [], created.props); await click("Report"); fillReport(); await click("Submit report");
-  assert.match(container.textContent || "", /Report submitted/); assert.match(container.textContent || "", /QS-3021/);
-  assert.match(container.textContent || "", /Saved with a warning/); assert.equal(created.state.writes.length, 1);
-  await click("Report another"); assert.equal(field("Short summary *").value, "");
-  act(() => { ReactDOM.unmountComponentAtNode(container); });
-  const posted = acceptedBackendHarness("progress", true);
-  await renderApp({}, [], posted.props); await click("Issue register"); await openIssue(); writeProgress("Accepted with receipt"); await click("Add update");
-  assert.match(container.textContent || "", /Saved with a warning/); assert.doesNotMatch(container.textContent || "", /Invalid Date/);
-  assert.equal(posted.state.writes.length, 1); assert.equal(button("Add update").disabled, true);
-  assert.equal(container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!.value, "");
-});
+}
 
 test("backend wrapper uses verified caller and connection and never shows stale direct targets", async () => {
   const dataService = { loadIssues: async () => [], loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }) };
@@ -2027,8 +2026,10 @@ test("a recovery read cannot clear another issue's newer accepted-write quaranti
   assert.ok(button("Reload saved data")); assert.deepEqual(writes, [1, 2]);
   await click("Back to register"); await openIssue(1001);
   const firstText = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
-  assert.equal(firstText.disabled, false); assert.equal(firstText.value, "");
+  assert.equal(firstText.disabled, true); assert.equal(firstText.value, "");
+  assert.match(container.textContent || "", /Issues changed during the reload/);
   await click("Reload saved data");
+  assert.equal(progressInput().disabled, false);
   await click("Back to register"); await openIssue(1002);
   assert.equal(container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!.value, "");
   assert.equal(button("Add update").disabled, true);
@@ -2051,4 +2052,180 @@ test("an accepted response arriving after App remount still quarantines the curr
   assert.equal(field("Short summary *").value, "Unsubmitted newer report");
   await click("Reload saved data");
   assert.equal(field("Short summary *").value, "Unsubmitted newer report"); assert.equal(button("Submit report").disabled, false);
+});
+
+for (const operation of ["append", "create", "Verify & close", "Save changes", "Verify & close readback failure", "Save changes readback failure"]) {
+  test(`delayed recovery preserves a newer ${operation}, drafts and guards until a fresh GET`, async () => {
+    const delayed = deferred<IIssue[]>();
+    let stored = [issue(), issue({ id: 2, qsNumber: 1002, transformedInto: "OFI" })];
+    let stale: IIssue[] = [];
+    let reads = 0;
+    const appends: number[] = [];
+    let creates = 0;
+    let updates = 0;
+    await renderApp({
+      loadIssues: async () => {
+        reads += 1;
+        if (reads === 2) { stale = structuredClone(stored); return delayed.promise; }
+        return structuredClone(stored);
+      },
+      addProgressLogEntry: async (id: number, entry: IProgressLogEntry) => {
+        appends.push(id);
+        const accepted = { ...entry, id: 70 + appends.length };
+        stored = stored.map(item => item.id === id ? { ...item, progressLog: [...item.progressLog, accepted] } : item);
+        if (id === 1) throw new AcceptedWriteError("progress");
+        return accepted;
+      },
+      updateIssue: async (id: number, patch: Partial<IIssue>) => {
+        updates += 1;
+        stored = stored.map(item => item.id === id ? { ...item, ...patch, eTag: '"2"' } : item);
+        if (operation.endsWith("readback failure")) throw new IssueRefreshError(id);
+        return stored.find(item => item.id === id)!;
+      },
+      createIssue: async (form: Partial<IIssue>) => {
+        creates += 1;
+        const saved = issue({ ...form, id: 3, qsNumber: 1003 });
+        stored = [...stored, saved];
+        return saved;
+      },
+    }, stored, { userEmail: `revision-${operation}@example.com` });
+    await click("Issue register"); await openIssue(1001);
+    writeProgress("A accepted observation"); await click("Add update");
+    await click("Reload saved data");
+    await click("Back to register");
+    if (operation === "create") {
+      await click("Report"); fillReport(); await click("Submit report");
+      await click("Report another"); fillReport(); change("Short summary *", "Unsubmitted next report");
+    } else {
+      await openIssue(1002);
+      change("Follow up (Quality Team notes)", "Independent detail on B");
+      writeProgress("B observation");
+      if (operation === "append") {
+        await click("Add update");
+        assert.equal(stored[1].eTag, '"1"');
+        writeProgress("B unposted next observation");
+      } else {
+        if (operation.startsWith("Save changes")) change("Status", "Closed");
+        await click(operation.startsWith("Save changes") ? "Save changes" : "Verify & close");
+        assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+      }
+    }
+    await act(async () => { delayed.resolve(stale); });
+    assert.match(container.textContent || "", /Issues changed during the reload/);
+    if (operation === "append") {
+      assert.match(container.querySelector("ol")?.textContent || "", /B observation/);
+      assert.equal(field("Follow up (Quality Team notes)").value, "Independent detail on B");
+      assert.equal(progressInput().value, "B unposted next observation");
+    } else if (operation === "create") {
+      assert.equal(field("Short summary *").value, "Unsubmitted next report");
+      assert.ok(button("Triage queue1"));
+    } else {
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+      assert.equal(button("Re-open issue").disabled, operation.endsWith("readback failure"));
+    }
+    await click("Reload saved data");
+    if (operation === "append") {
+      assert.match(container.querySelector("ol")?.textContent || "", /B observation/);
+      assert.equal(field("Follow up (Quality Team notes)").value, "Independent detail on B");
+      assert.equal(progressInput().value, "B unposted next observation");
+    } else if (operation === "create") {
+      assert.equal(field("Short summary *").value, "Unsubmitted next report");
+      await click("Triage queue1");
+      assert.match(container.textContent || "", /QS-1003/);
+      await click("Issue register");
+    } else {
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+    }
+    if (operation !== "create") await click("Back to register");
+    await openIssue(1001);
+    assert.equal(progressInput().disabled, false);
+    assert.equal(progressInput().value, "");
+    assert.match(container.querySelector("ol")?.textContent || "", /A accepted observation/);
+    assert.deepEqual(appends, operation === "append" ? [1, 2] : [1]);
+    assert.equal(creates, operation === "create" ? 1 : 0);
+    assert.equal(updates, ["append", "create"].includes(operation) ? 0 : 1);
+    assert.equal(reads, 3);
+  });
+}
+
+async function waitForUi(condition: () => boolean): Promise<void> {
+  await act(async () => {
+    for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  });
+  assert.ok(condition(), "The pending UI operation should settle");
+}
+
+function hasButton(text: string): boolean {
+  return Array.from(container.querySelectorAll("button")).some(candidate => candidate.textContent === text);
+}
+
+const directIssue = () => ({
+  Id: 1, QsNumber: 1001, ShortSummary: "Cold-chain breach", Description: "Reported", Severity: "High", ReportDate: "2026-06-01",
+  Triaged: "Yes", TaskCreated: "Yes", Status: "In Progress", TransformedInto: "OFI", "odata.etag": '"1"',
+  TaskOwner: { Id: 7, Title: "Owner", EMail: "owner@example.com" },
+});
+
+for (const operation of ["create", "progress"] as const) {
+  test(`direct PnP ${operation} accepted unreadable response blocks duplicate POST through navigation/remount and failed recovery`, async () => {
+    const h = sharePointHttpHarness([directIssue()]);
+    const mutations = () => h.state.requests.filter(call => call.method === "POST" && !call.path.toLowerCase().endsWith("/ensureuser"));
+    const props = { dataService: h.service, userEmail: `direct-${operation}@example.com` };
+    h.state.reply = () => new Response(operation === "create" ? "null" : "malformed", { status: 201 });
+    try {
+      await renderApp({}, [], props); await waitForUi(() => hasButton("Issue register"));
+      if (operation === "create") { await click("Report"); fillReport(); await click("Submit report"); }
+      else {
+        await click("Issue register"); await openIssue();
+        change("Follow up (Quality Team notes)", "Unsubmitted direct detail");
+        writeProgress("Accepted direct observation"); await click("Add update");
+      }
+      await waitForUi(() => hasButton("Reload saved data"));
+      const assertGuard = () => {
+        if (operation === "create") { assert.equal(field("Short summary *").disabled, true); assert.equal(field("Short summary *").value, ""); }
+        else { assert.equal(progressInput().disabled, true); assert.equal(progressInput().value, ""); }
+      };
+      assertGuard();
+      if (operation === "progress") assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted direct detail");
+      assert.equal(mutations().length, 1);
+      if (operation === "create") { await click("Issue register"); await click("Report"); }
+      else { await click("Back to register"); await openIssue(); }
+      assertGuard();
+      act(() => { ReactDOM.unmountComponentAtNode(container); });
+      await renderApp({}, [], props); await waitForUi(() => hasButton("Issue register"));
+      if (operation === "create") await click("Report");
+      else { await click("Issue register"); await openIssue(); }
+      assertGuard();
+      h.state.failReads = true;
+      await click("Reload saved data"); await waitForUi(() => hasButton("Reload saved data")); assertGuard();
+      assert.match(container.textContent || "", /Reload is still unavailable/);
+      h.state.failReads = false;
+      await click("Reload saved data"); await waitForUi(() => !hasButton("Reloading saved data…") && !hasButton("Reload saved data"));
+      if (operation === "create") assert.equal(field("Short summary *").disabled, false);
+      else { assert.equal(progressInput().disabled, false); assert.match(container.querySelector("ol")?.textContent || "", /Accepted direct observation/); }
+      assert.equal(mutations().length, 1);
+    } finally { h.restore(); }
+  });
+}
+
+test("direct accepted append displays unknown native audit details until reload without reposting", async () => {
+  const h = sharePointHttpHarness([directIssue()]);
+  h.state.failProgressRead = true;
+  try {
+    await renderApp({}, [], { dataService: h.service, userEmail: "native-audit@example.com" });
+    await waitForUi(() => hasButton("Issue register"));
+    await click("Issue register"); await openIssue(); writeProgress("Accepted without native readback"); await click("Add update");
+    await waitForUi(() => hasButton("Reload saved issue"));
+    const journal = () => container.querySelector("ol")?.textContent || "";
+    assert.match(journal(), /Awaiting server author/);
+    assert.match(journal(), /Awaiting server details/);
+    assert.doesNotMatch(journal(), /Quality Manager|Invalid Date/);
+    assert.equal(progressInput().value, "");
+    h.state.failProgressRead = false;
+    await click("Reload saved issue"); await waitForUi(() => journal().includes("Native author"));
+    assert.doesNotMatch(journal(), /Awaiting server|Invalid Date/);
+    assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+  } finally { h.restore(); }
 });

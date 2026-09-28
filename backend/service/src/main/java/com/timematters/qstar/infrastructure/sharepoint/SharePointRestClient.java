@@ -20,6 +20,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriUtils;
 
@@ -272,7 +273,14 @@ public class SharePointRestClient {
         headers.set("Accept", "application/json;odata=verbose");
         headers.set("Content-Type", "application/json;odata=verbose");
         if (extra != null) headers.addAll(extra);
-        return rest.exchange(uri(path), method, new HttpEntity<>(body, headers), String.class);
+        ResponseEntity<String> response =
+                rest.exchange(uri(path), method, new HttpEntity<>(body, headers), String.class);
+        if (!response.getStatusCode().is2xxSuccessful())
+            throw new RestClientException(
+                    "SharePoint returned an unexpected HTTP status ("
+                            + response.getStatusCode().value()
+                            + ").");
+        return response;
     }
 
     private URI uri(String path) {

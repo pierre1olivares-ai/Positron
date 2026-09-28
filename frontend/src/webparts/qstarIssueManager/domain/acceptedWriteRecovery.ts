@@ -1,6 +1,9 @@
 export interface IAcceptedReceipt {
   message: string;
   submitted: string;
+  issueId?: number;
+  qsNumber?: number;
+  entryId?: number;
 }
 export type AcceptedReceipts = Record<string, IAcceptedReceipt>;
 

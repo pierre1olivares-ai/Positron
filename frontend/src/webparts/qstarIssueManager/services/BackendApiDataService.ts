@@ -4,7 +4,8 @@ import { ISettings, normalizeSettings } from "../models/ISettings";
 import { normalizeDateOnly } from "../domain/calendarDates";
 import { normalizeRegion } from "../domain/referenceData";
 import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "./issueErrors";
-import { backendError, backendJson, IBackendResponse, IBackendTransport, positiveId } from "./BackendApiClient";
+import { backendError, backendJson, IBackendResponse, IBackendTransport } from "./BackendApiClient";
+import { positiveId } from "./sharePointValues";
 
 const CALENDAR_FIELDS: (keyof IIssue)[] = ["reportDate", "dueDate", "implementationDate", "verifiedDate", "closedDate", "holdUntil"];
 const STRING_FIELDS: (keyof IIssue)[] = [
@@ -33,13 +34,14 @@ export class BackendApiDataService implements IDataService {
   public async createIssue(issue: Partial<IIssue>): Promise<IIssue> {
     const response = await this.client.request("/issues", "POST", writableIssue(issue));
     if (!response.ok) throw await backendError(response);
-    try { return this.remember(readIssue(await response.json())); }
-    catch {
-      // A successful HTTP response acknowledges persistence, even if JSON decoding fails.
-      const id = locationId(response, /^\/issues\/([1-9]\d*)\/?$/);
+    let value: Partial<IIssue> | undefined;
+    try {
+      value = await response.json() as Partial<IIssue>;
+      return this.remember(readIssue(value));
+    } catch {
+      const issueId = positiveId(value?.id) ? value.id : locationId(response, /^\/issues\/([1-9]\d*)\/?$/);
       const qsNumber = Number(response.headers.get("X-QStar-Reference"));
-      if (!id || !positiveId(qsNumber)) throw new AcceptedWriteError("create");
-      return readIssue({ ...issue, id, qsNumber, eTag: undefined, progressLog: [], saveWarning: "Your report was saved. Reload its server-recorded details; do not submit it again." });
+      throw new AcceptedWriteError("create", { issueId, qsNumber: positiveId(value?.qsNumber) ? value.qsNumber : positiveId(qsNumber) ? qsNumber : undefined });
     }
   }
 
@@ -83,16 +85,18 @@ export class BackendApiDataService implements IDataService {
     // The API records its authenticated caller and SharePoint Created time.
     const response = await this.client.request(`/issues/${id}/progress`, "POST", { text: entry.text.trim() });
     if (!response.ok) throw await backendError(response);
-    try { return readProgress(await response.json()); }
-    catch {
+    let value: Partial<IProgressLogEntry> | undefined;
+    try {
+      value = await response.json() as Partial<IProgressLogEntry>;
+      return readProgress(value);
+    } catch {
       const locationEntryId = locationId(response, /^\/issues\/([1-9]\d*)\/progress\/([1-9]\d*)\/?$/, id);
       const entryHeader = response.headers.get("X-QStar-Entry-Id");
       const headerEntryId = entryHeader && /^[1-9]\d*$/.test(entryHeader) ? Number(entryHeader) : undefined;
       if ((response.headers.get("Location") && !locationEntryId) || (entryHeader && !positiveId(headerEntryId)) ||
-          (locationEntryId && headerEntryId && locationEntryId !== headerEntryId)) throw new AcceptedWriteError("progress");
-      const entryId = locationEntryId || headerEntryId;
-      if (!entryId) throw new AcceptedWriteError("progress");
-      return { id: entryId, text: entry.text.trim(), author: "", ts: "", saveWarning: "Your update was posted. Reload its server-recorded author and time; do not post it again." };
+          (locationEntryId && headerEntryId && locationEntryId !== headerEntryId)) throw new AcceptedWriteError("progress", { issueId: id });
+      const entryId = locationEntryId || headerEntryId || (positiveId(value?.id) ? value.id : undefined);
+      throw new AcceptedWriteError("progress", { issueId: id, entryId });
     }
   }
 

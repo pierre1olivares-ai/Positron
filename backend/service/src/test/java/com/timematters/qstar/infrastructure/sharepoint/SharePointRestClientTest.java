@@ -7,8 +7,7 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.configuration.security.SharePointAccessTokenProvider;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
@@ -17,7 +16,11 @@ import org.springframework.http.MediaType;
 import org.springframework.mock.http.client.MockClientHttpRequest;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
+
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 class SharePointRestClientTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -104,7 +107,8 @@ class SharePointRestClientTest {
                                         body(request).path("logonName").asText()))
                 .andRespond(
                         withSuccess(
-                                "{\"d\":{\"Id\":8,\"Title\":\"New owner\",\"Email\":\"new@example.com\"}}",
+                                "{\"d\":{\"Id\":8,\"Title\":\"New"
+                                    + " owner\",\"Email\":\"new@example.com\"}}",
                                 MediaType.APPLICATION_JSON));
         assertEquals(8, client.ensureUser("new@example.com").id());
         server.verify();
@@ -121,7 +125,8 @@ class SharePointRestClientTest {
                         request -> {
                             JsonNode payload = body(request);
                             assertEquals(
-                                    "https://example.sharepoint.com/sites/q/Lists/Progress Log/issue-42",
+                                    "https://example.sharepoint.com/sites/q/Lists/Progress"
+                                        + " Log/issue-42",
                                     payload.path("listItemCreateInfo")
                                             .path("FolderPath")
                                             .path("DecodedUrl")
@@ -165,6 +170,94 @@ class SharePointRestClientTest {
         assertThrows(
                 AcceptedWriteException.class,
                 () -> client.createItem("Issues", Map.of("Title", "accepted")));
+        server.verify();
+    }
+
+    @Test
+    void redirectsRejectCreateUpdateAndAppendWithoutFollowupRequestsOrAcceptedReceipts() {
+        for (HttpStatus status :
+                new HttpStatus[] {HttpStatus.FOUND, HttpStatus.TEMPORARY_REDIRECT}) {
+            for (String operation : new String[] {"create", "update", "progress"}) {
+                server.reset();
+                if (operation.equals("create"))
+                    server.expect(anything())
+                            .andExpect(method(HttpMethod.GET))
+                            .andRespond(
+                                    withSuccess(
+                                            "{\"d\":{\"results\":[{\"Id\":1,\"ReferenceOffset\":3000}]}}",
+                                            MediaType.APPLICATION_JSON));
+                server.expect(anything())
+                        .andExpect(method(HttpMethod.GET))
+                        .andRespond(
+                                withSuccess(
+                                        "{\"d\":{\"ListItemEntityTypeFullName\":\"SP.Data.IssuesListItem\",\"RootFolder\":{\"ServerRelativeUrl\":\"/sites/q/Lists/Progress\"}}}",
+                                        MediaType.APPLICATION_JSON));
+                if (operation.equals("progress"))
+                    server.expect(anything())
+                            .andExpect(method(HttpMethod.GET))
+                            .andRespond(
+                                    withSuccess(
+                                            "{\"d\":{\"Exists\":true}}",
+                                            MediaType.APPLICATION_JSON));
+                server.expect(anything())
+                        .andExpect(method(HttpMethod.POST))
+                        .andRespond(
+                                withStatus(status)
+                                        .header("Location", "https://outside.invalid/private")
+                                        .body("<html>private response with caller-token</html>"));
+                var repository = new IssueRepository(client, properties);
+                var error =
+                        assertThrows(
+                                RestClientException.class,
+                                () -> {
+                                    switch (operation) {
+                                        case "create" ->
+                                                repository.create(Map.of("shortSummary", "Draft"));
+                                        case "update" ->
+                                                repository.update(
+                                                        42, Map.of("followUp", "Draft"), "\"1\"");
+                                        case "progress" ->
+                                                repository.append(
+                                                        42,
+                                                        "Draft",
+                                                        new SharePointUser(
+                                                                7, "Caller", "caller@example.com"));
+                                        default -> fail(operation);
+                                    }
+                                });
+                assertEquals(
+                        "SharePoint returned an unexpected HTTP status (" + status.value() + ").",
+                        error.getMessage());
+                assertNull(error.getCause());
+                server.verify();
+            }
+        }
+    }
+
+    @Test
+    void malformed201AppendStillReturnsAnAcceptedReceiptWithoutRereading() {
+        server.expect(anything())
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(
+                        withSuccess(
+                                "{\"d\":{\"RootFolder\":{\"ServerRelativeUrl\":\"/sites/q/Lists/Progress\"}}}",
+                                MediaType.APPLICATION_JSON));
+        server.expect(anything())
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{\"d\":{\"Exists\":true}}", MediaType.APPLICATION_JSON));
+        server.expect(anything())
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.CREATED).body("malformed"));
+        var saved =
+                new IssueRepository(client, properties)
+                        .append(
+                                42,
+                                "Accepted",
+                                new SharePointUser(7, "Caller", "caller@example.com"));
+        assertNull(saved.getId());
+        assertEquals("Accepted", saved.getText());
+        assertEquals("", saved.getTs());
+        assertNotNull(saved.getSaveWarning());
         server.verify();
     }
 

@@ -9,7 +9,7 @@ import lombok.Data;
  * Internal representation of a Q-Star issue. Field names deliberately mirror
  * frontend/src/webparts/qstarIssueManager/models/IIssue.ts one-for-one, which itself mirrors the
  * prototype's in-memory issue object — so the ATO mapping (generated from
- * api-contract/contract.yaml) and the SharePoint field mapping (IssueFields) both stay
+ * api-contract/contract.yaml) and the SharePoint field mapping (IssueRepository) both stay
  * straightforward 1:1 lookups.
  */
 @Data

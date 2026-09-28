@@ -156,4 +156,23 @@ for (const timezone of ["Europe/Amsterdam", "America/New_York"]) {
     act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: [] }), container); });
     assert.match(container.textContent || "", /Backlog flat year to date/);
   });
+
+  test(`forwarded reports create no open tasks or backlog in ${timezone}`, () => {
+    process.env.TZ = timezone;
+    asOf = [2026, 0, 1];
+    const forwarded = { ...reported("2026-01-01", "Only sent to Dept/BU for Action"), status: "Created", taskCreated: "No" };
+    act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: [forwarded] }), container); });
+    assert.deepEqual(chartInput(0), [{ name: "Jan 26", Created: 1, Closed: 0, Backlog: 0, Net: 1 }]);
+    const open = Array.from(container.querySelectorAll("div")).find(element => element.textContent === "Open issues");
+    assert.equal(open?.nextElementSibling?.textContent, "0");
+    assert.match(container.textContent || "", /Backlog flat year to date/);
+    const carried = [
+      forwarded, { ...forwarded, reportDate: "2025-12-30" },
+      reported("2025-12-31", "OFI", "2026-01-01"),
+      reported("2025-12-31", "NC Minor"),
+    ];
+    act(() => { ReactDOM.render(React.createElement(Dashboard, { issues: carried }), container); });
+    assert.deepEqual(chartInput(0), [{ name: "Jan 26", Created: 1, Closed: 1, Backlog: 1, Net: 0 }]);
+    assert.match(container.textContent || "", /Backlog ▼ -1 year to date/);
+  });
 }

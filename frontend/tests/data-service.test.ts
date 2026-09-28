@@ -4,8 +4,9 @@ import type { SPFI } from "@pnp/sp";
 import type { WebPartContext } from "@microsoft/sp-webpart-base";
 import { SharePointDataService } from "../src/webparts/qstarIssueManager/services/SharePointDataService";
 import { MockDataService } from "../src/webparts/qstarIssueManager/services/MockDataService";
-import { IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
+import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
 import { normalizeSettings } from "../src/webparts/qstarIssueManager/models/ISettings";
+import { sharePointHttpHarness } from "./sharepoint-http-harness";
 
 type Row = Record<string, any>;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value));
@@ -74,6 +75,7 @@ function harness(initial: Row[] = []) {
       for (let i = 0; i < all.length; i += 2) yield clone(all.slice(i, i + 2));
     };
     query.getById = (id: number) => item(title, id);
+    query.using = () => query;
     query.add = async (fields: Row) => {
       state.creates.push(clone(fields));
       const row = { Id: state.nextId++, "odata.etag": '"1"' };
@@ -88,6 +90,7 @@ function harness(initial: Row[] = []) {
     query.select = () => query;
     query.expand = () => query;
     query.items = items(title);
+    query.using = () => query;
     query.rootFolder = { folders: { addUsingPath: async (path: string) => {
       if (!state.canCreateFolder) throw failure(403);
       state.folders.add(path);
@@ -254,4 +257,95 @@ test("legacy settings cannot override the connection or role configuration", () 
   assert.deepEqual(normalizeSettings({ msFormUrl: "https://forms.office.com/report", flowId: "flow", spSiteUrl: "https://old.example", spListName: "old", access: [{ email: "someone", role: "admin" }] }), {
     msFormUrl: "https://forms.office.com/report", flowId: "flow", access: [],
   });
+});
+
+for (const operation of ["create", "progress"] as const) {
+  const submit = (service: SharePointDataService) => operation === "create"
+    ? service.createIssue({ shortSummary: "Submitted" })
+    : service.addProgressLogEntry(1, { text: "Submitted", author: "Unverified", ts: "1900-01-01" });
+  test(`direct ${operation} classifies only confirmed 2xx unreadable bodies as accepted without another POST`, async () => {
+    const bodies = operation === "create"
+      ? ["null", "{}", "[]", "123", '{"Id":0}', '{"Id":-1}', '{"Id":1.5}', '{"Id":"21"}', '{"Id":9007199254740992}']
+      : ["null", "{}", "[]", '{"value":{}}', '{"value":[null]}', '{"value":[{"ItemId":71}]}', '{"value":[{"FieldName":"Id","FieldValue":"0","HasException":false}]}', '{"value":[{"FieldName":"Id","ItemId":-1,"HasException":false}]}', '{"value":[{"FieldName":"Id","FieldValue":"not-an-id","HasException":false}]}'];
+    const replies = [
+      ...["malformed", "", "   ", ...bodies].map(body => () => new Response(body, { status: 201 })),
+      () => new Response(null, { status: 204 }),
+      () => Object.assign(new Response("{}", { status: 200 }), { json: async () => { throw new TypeError("Body stream failed"); } }),
+    ];
+    for (const reply of replies) {
+      const h = sharePointHttpHarness();
+      h.state.reply = reply;
+      try {
+        await assert.rejects(submit(h.service), (error: unknown) => {
+          assert.ok(error instanceof AcceptedWriteError);
+          assert.equal(error.operation, operation);
+          assert.equal(error.saved, true);
+          if (operation === "progress") assert.equal(error.identity.issueId, 1);
+          return true;
+        });
+        const writes = h.state.requests.filter(call => call.method === "POST");
+        assert.equal(writes.length, 1);
+        assert.equal(h.state.requests.indexOf(writes[0]), h.state.requests.length - 1);
+      } finally { h.restore(); }
+    }
+  });
+
+  test(`direct ${operation} keeps network/SyntaxError and non-2xx failures ordinary with one POST`, async () => {
+    for (const failure of [new TypeError("Network unavailable"), new SyntaxError("Transport failure"), 403, 500, 302]) {
+      const h = sharePointHttpHarness();
+      h.state.reply = () => { if (failure instanceof Error) throw failure; return new Response("Rejected", { status: failure }); };
+      try {
+        await assert.rejects(submit(h.service), (error: any) => {
+          assert.equal(error instanceof AcceptedWriteError, false);
+          if (failure instanceof Error) assert.equal(error, failure);
+          else { assert.equal(error.isHttpRequestError, true); assert.equal(error.status, failure); }
+          return true;
+        });
+        assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+      } finally { h.restore(); }
+    }
+  });
+}
+
+test("direct create preserves a known ID when its allocated reference is unsupported", async () => {
+  const h = sharePointHttpHarness();
+  h.state.reply = () => new Response('{"Id":9007199254740991}', { status: 201 });
+  try {
+    await assert.rejects(h.service.createIssue({ shortSummary: "Submitted" }), (error: unknown) => {
+      assert.ok(error instanceof AcceptedWriteError);
+      assert.equal(error.identity.issueId, 9007199254740991);
+      return true;
+    });
+    assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+  } finally { h.restore(); }
+});
+
+test("direct AddValidateUpdate field rejection remains an ordinary failure", async () => {
+  const h = sharePointHttpHarness();
+  h.state.reply = () => new Response(JSON.stringify({ value: [{ FieldName: "EntryText", HasException: true, ErrorMessage: "Field rejected" }] }), { status: 200 });
+  try {
+    await assert.rejects(h.service.addProgressLogEntry(1, { text: "Rejected", author: "", ts: "" }), (error: unknown) => {
+      assert.equal(error instanceof AcceptedWriteError, false);
+      assert.match((error as Error).message, /Field rejected/);
+      return true;
+    });
+    assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+  } finally { h.restore(); }
+});
+
+test("direct append readback failure keeps native audit details unknown until a successful read", async () => {
+  const h = sharePointHttpHarness([issue(1)]);
+  h.state.failProgressRead = true;
+  try {
+    const saved = await h.service.addProgressLogEntry(1, { text: "Accepted", author: "Unverified", authorEmail: "unverified@example.com", authorId: 99, ts: "1900-01-01" });
+    assert.equal(saved.id, 71);
+    assert.equal(saved.author, ""); assert.equal(saved.ts, "");
+    assert.equal(saved.authorId, undefined); assert.equal(saved.authorEmail, undefined);
+    assert.ok(saved.saveWarning);
+    h.state.failProgressRead = false;
+    const fresh = await h.service.getIssue(1);
+    assert.equal(fresh.progressLog[0].ts, "2026-09-28T14:00:00Z");
+    assert.equal(fresh.progressLog[0].author, "Native author");
+    assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+  } finally { h.restore(); }
 });

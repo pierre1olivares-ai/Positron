@@ -11,6 +11,10 @@ export interface IPersonValue {
   email: string;
 }
 
+export function positiveId(value: unknown): value is number {
+  return typeof value === "number" && isFinite(value) && value > 0 && value <= 9007199254740991 && Math.floor(value) === value;
+}
+
 export function readPersonValue(raw: SPUserValue | string | undefined): IPersonValue {
   if (!raw) return { displayName: "", email: "" };
   if (typeof raw === "string") return { displayName: raw, email: "" };

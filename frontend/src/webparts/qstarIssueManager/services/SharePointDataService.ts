@@ -1,5 +1,6 @@
 import type { WebPartContext } from "@microsoft/sp-webpart-base";
 import { spfi, SPFI, SPFx } from "@pnp/sp";
+import { BrowserFetch, parseBinderWithErrorCheck, parseODataJSON } from "@pnp/queryable";
 import "@pnp/sp/webs";
 import "@pnp/sp/lists";
 import "@pnp/sp/items";
@@ -20,10 +21,10 @@ import {
   DEFAULT_ISSUES_LIST,
   DEFAULT_PROGRESS_LIST,
 } from "./fieldMap";
-import { readPersonValue } from "./sharePointValues";
+import { positiveId, readPersonValue } from "./sharePointValues";
 import { normalizeDateOnly } from "../domain/calendarDates";
 import { normalizeRegion } from "../domain/referenceData";
-import { IssueConflictError, IssueRefreshError } from "./issueErrors";
+import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "./issueErrors";
 
 type SPItem = Record<string, unknown> & { Id: number };
 
@@ -36,6 +37,12 @@ const boolToYesNo = (v: boolean | undefined): string => (v ? "Yes" : "No");
 // SharePoint REST requires null (rather than an empty string) to clear DateTime fields.
 // eslint-disable-next-line @rushstack/no-new-null
 const emptyToNull = (v: string): string | null => v || null;
+
+const acceptedWriteParse = (operation: "create" | "progress", issueId?: number): ReturnType<typeof parseBinderWithErrorCheck> =>
+  parseBinderWithErrorCheck(async (response) => {
+    try { return parseODataJSON(await response.json()); }
+    catch { throw new AcceptedWriteError(operation, { issueId }); }
+  });
 
 /**
  * Real production data layer: reads/writes the "Q-Star Issues" and
@@ -112,9 +119,11 @@ export class SharePointDataService implements IDataService {
     const fields = await this.toSPFields({ ...issue, qsNumber: undefined });
     const result = await this.sp.web.lists
       .getByTitle(this.issuesListName)
-      .items.add(fields);
-    const id = result.Id as number;
+      .items.using(BrowserFetch(), acceptedWriteParse("create")).add(fields);
+    const id = result?.Id;
+    if (!positiveId(id)) throw new AcceptedWriteError("create");
     const qsNumber = offset + id;
+    if (!positiveId(qsNumber)) throw new AcceptedWriteError("create", { issueId: id });
     // Once POST succeeds, never turn a follow-up failure into a retryable create.
     let saveWarning: string | undefined;
     try {
@@ -178,21 +187,24 @@ export class SharePointDataService implements IDataService {
         throw new Error("Progress access for this issue is still being prepared. Your text has been kept; retry after the assignment permissions flow completes.");
       }
     }
-    const result = await list.addValidateUpdateItemUsingPath([
-      { FieldName: "Title", FieldValue: `Issue ${id} progress` },
-      { FieldName: PROGRESS_FIELDS.text, FieldValue: entry.text },
-    ], `${this.webOrigin}${folder}`);
+    const result = await this.sp.web.lists.getByTitle(this.progressListName)
+      .using(BrowserFetch(), acceptedWriteParse("progress", id)).addValidateUpdateItemUsingPath([
+        { FieldName: "Title", FieldValue: `Issue ${id} progress` },
+        { FieldName: PROGRESS_FIELDS.text, FieldValue: entry.text },
+      ], `${this.webOrigin}${folder}`);
+    if (!Array.isArray(result) || result.some((field) => !field || typeof field.FieldName !== "string" || typeof field.HasException !== "boolean")) {
+      throw new AcceptedWriteError("progress", { issueId: id });
+    }
     const failures = result.filter((field) => field.HasException);
     if (failures.length) throw new Error(failures.map((field) => field.ErrorMessage || "Progress entry validation failed.").join(" "));
     const idResult = result.filter((field) => field.ItemId || field.FieldName === "Id" || field.FieldName === "ID")[0];
     const entryId = idResult && (idResult.ItemId || Number(idResult.FieldValue));
-    if (entryId) {
-      try {
-        const saved = await list.items.getById(entryId).select("Id", ...PROGRESS_SELECT_FIELD_NAMES).expand(PROGRESS_FIELDS.author)();
-        return this.toProgressEntry(saved as SPItem);
-      } catch { /* The append succeeded; a failed read must not encourage a duplicate append. */ }
-    }
-    return { ...entry, id: entryId || undefined, saveWarning: "Your update was posted. Refresh to reload its server-recorded author and time; do not post it again." };
+    if (!positiveId(entryId)) throw new AcceptedWriteError("progress", { issueId: id });
+    try {
+      const saved = await list.items.getById(entryId).select("Id", ...PROGRESS_SELECT_FIELD_NAMES).expand(PROGRESS_FIELDS.author)();
+      return this.toProgressEntry(saved as SPItem);
+    } catch { /* The append succeeded; a failed read must not encourage a duplicate append. */ }
+    return { id: entryId, text: entry.text, author: "", ts: "", saveWarning: "Your update was posted. Refresh to reload its server-recorded author and time; do not post it again." };
   }
 
   public async loadSettings(): Promise<ISettings> {

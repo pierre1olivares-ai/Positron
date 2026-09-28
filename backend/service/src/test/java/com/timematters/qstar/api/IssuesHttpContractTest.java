@@ -15,10 +15,7 @@ import com.timematters.qstar.infrastructure.sharepoint.IssueRepository;
 import com.timematters.qstar.model.Issue;
 import com.timematters.qstar.model.ProgressLogEntry;
 import com.timematters.qstar.service.IssueService;
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.Map;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -27,6 +24,12 @@ import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.client.RestClientException;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Map;
 
 class IssuesHttpContractTest {
     private final IssueRepository repository = mock(IssueRepository.class);
@@ -186,5 +189,56 @@ class IssuesHttpContractTest {
                         .getHeader("Location");
         assertEquals("/api/v1/issues/42/progress/19", journal);
         mvc.perform(get(journal)).andExpect(status().isOk());
+    }
+
+    @Test
+    void unexpectedTransportStatusReturns502WithoutAcceptedReceiptOrReadback() throws Exception {
+        for (int status : new int[] {302, 307}) {
+            for (String operation : new String[] {"create", "update", "progress"}) {
+                reset(repository);
+                when(repository.findById(42)).thenReturn(issue());
+                var failure = new RestClientException("HTTP " + status + " private transport data");
+                var request =
+                        switch (operation) {
+                            case "create" -> {
+                                when(repository.create(anyMap())).thenThrow(failure);
+                                yield post("/api/v1/issues")
+                                        .content(
+                                                "{\"shortSummary\":\"Draft\",\"description\":\"Description\",\"severity\":\"Medium\"}");
+                            }
+                            case "update" -> {
+                                doThrow(failure)
+                                        .when(repository)
+                                        .update(eq(42L), anyMap(), eq("\"3\""));
+                                yield patch("/api/v1/issues/42")
+                                        .header("If-Match", "\"3\"")
+                                        .content("{\"followUp\":\"Draft\"}");
+                            }
+                            default -> {
+                                when(repository.append(eq(42L), eq("Draft"), any()))
+                                        .thenThrow(failure);
+                                yield post("/api/v1/issues/42/progress")
+                                        .content("{\"text\":\"Draft\"}");
+                            }
+                        };
+                var response =
+                        mvc.perform(request.contentType(MediaType.APPLICATION_JSON))
+                                .andExpect(status().isBadGateway())
+                                .andExpect(jsonPath("$.code").value("SHAREPOINT_UNAVAILABLE"))
+                                .andExpect(jsonPath("$.saved").doesNotExist())
+                                .andExpect(header().doesNotExist("Location"))
+                                .andReturn()
+                                .getResponse();
+                assertFalse(response.getContentAsString().contains("private transport data"));
+                if (operation.equals("create")) verify(repository).create(anyMap());
+                else {
+                    verify(repository).findById(42);
+                    if (operation.equals("update"))
+                        verify(repository).update(eq(42L), anyMap(), eq("\"3\""));
+                    else verify(repository).append(eq(42L), eq("Draft"), any());
+                }
+                verifyNoMoreInteractions(repository);
+            }
+        }
     }
 }

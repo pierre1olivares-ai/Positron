@@ -580,7 +580,7 @@ export function Dashboard({ issues: allIssues }) {
   const ncRate = ncs.length ? Math.round((ncVerified.length / ncs.length) * 100) : 0;
 
   // Monthly trend — current year (Jan → current month)
-  const backlogAt = (end) => datedCreated.filter((i) => iso(i.reportDate) <= end && (i.status !== "Closed" || (iso(i.closedDate) && iso(i.closedDate) > end))).length;
+  const backlogAt = (end) => datedCreated.filter((i) => iso(i.reportDate) <= end && (isOpen(i) || (i.taskCreated === "Yes" && i.status === "Closed" && iso(i.closedDate) > end))).length;
   const months = [];
   for (let mo = 0; mo <= nowD.getMonth(); mo++) {
     const d = new Date(curYear, mo, 1);
@@ -988,7 +988,7 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, 
               <span className="absolute -left-[21px] top-1.5 h-2.5 w-2.5 rounded-full ring-4 ring-white" style={{ backgroundColor: BRAND.navy }} />
               <div className="rounded-lg bg-white p-3 ring-1 ring-slate-100">
                 <div className="mb-1 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">{e.author}</span>
+                  <span className="text-xs font-semibold text-slate-700">{e.author || "Awaiting server author"}</span>
                   <span className="font-mono text-xs text-slate-400">{fmtDateTime(e.ts)}</span>
                 </div>
                 <p className="whitespace-pre-wrap text-sm text-slate-700">{e.text}</p>
@@ -1900,7 +1900,12 @@ export default function App({
   onRunDiagnostics,
   connection,
 }: IQstarPrototypeProps) {
-  const [issues, setIssues] = useState(null);
+  const [issues, setIssueState] = useState(null);
+  const issueStateRevision = useRef(0);
+  const setIssues = (next) => {
+    issueStateRevision.current += 1;
+    setIssueState(next);
+  };
   const latestIssues = useRef(issues);
   latestIssues.current = issues;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
@@ -1918,7 +1923,11 @@ export default function App({
   const appMounted = useRef(true);
   useEffect(() => {
     appMounted.current = true;
-    const accept = (receipts) => { acceptedRef.current = receipts; setAcceptedReceipts(receipts); };
+    const accept = (receipts) => {
+      issueStateRevision.current += 1;
+      acceptedRef.current = receipts;
+      setAcceptedReceipts(receipts);
+    };
     accept(readAcceptedReceipts(recoveryKey));
     const unsubscribe = subscribeAcceptedReceipts(recoveryKey, accept);
     return () => { appMounted.current = false; unsubscribe(); };
@@ -1930,7 +1939,7 @@ export default function App({
     writeAcceptedReceipts(recoveryKey, next);
   };
   const quarantine = (operation, error, submitted) => {
-    saveReceipts({ ...readAcceptedReceipts(recoveryKey), [operation]: { message: error.message, submitted } });
+    saveReceipts({ ...readAcceptedReceipts(recoveryKey), [operation]: { message: error.message, submitted, ...error.identity } });
   };
   const recoverAcceptedWrites = async () => {
     if (recoveringAccepted) return;
@@ -1938,10 +1947,13 @@ export default function App({
     setRecoveringAccepted(true); setRecoveryError("");
     try {
       await Promise.all(Array.from(pendingOperations.current.values()).map((pending) => pending.catch(() => undefined)));
+      const revision = issueStateRevision.current;
       const refreshed = await dataService.loadIssues();
-      if (appMounted.current) setIssues(refreshed);
-      // A different issue may accept a write during this read. Only reconcile
-      // the exact receipts this explicit recovery began with.
+      if (!appMounted.current) return;
+      if (revision !== issueStateRevision.current || pendingOperations.current.size || createPending.current) {
+        throw new Error("Issues changed during the reload. Wait for pending work to finish, then reload saved data again.");
+      }
+      setIssues(refreshed);
       const remaining = { ...readAcceptedReceipts(recoveryKey) };
       Object.keys(recoveringReceipts).forEach((key) => {
         if (remaining[key] === recoveringReceipts[key]) delete remaining[key];

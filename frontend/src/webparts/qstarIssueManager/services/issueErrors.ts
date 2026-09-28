@@ -1,11 +1,14 @@
 import { IIssue } from "../models/IIssue";
+import type { IAcceptedReceipt } from "../domain/acceptedWriteRecovery";
 
-/** HTTP accepted the append, but the response did not identify its saved record. */
 export class AcceptedWriteError extends Error {
   public readonly saved = true;
   public readonly code = "ACCEPTED_WRITE";
 
-  constructor(public readonly operation: "create" | "progress") {
+  constructor(
+    public readonly operation: "create" | "progress",
+    public readonly identity: Pick<IAcceptedReceipt, "issueId" | "qsNumber" | "entryId"> = {}
+  ) {
     super("Your submission was saved, but its receipt could not be read. Reload saved data before submitting anything else; do not submit the same content again.");
     this.name = "AcceptedWriteError";
     (Object as ObjectConstructor & { setPrototypeOf(target: object, prototype: object): object })

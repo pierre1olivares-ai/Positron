@@ -80,15 +80,21 @@ test("accepted PATCH receipt or malformed success remains a saved refresh error"
   }
 });
 
-test("accepted POST warnings/header fallbacks retain IDs without inventing server author/time", async () => {
+test("accepted POST warnings succeed but unreadable bodies retain IDs in guarded receipts", async () => {
   const h = harness(() => response(issue({ saveWarning: "Reference sync pending" }), 201));
   assert.equal((await h.service.createIssue({ shortSummary: "Submitted" })).saveWarning, "Reference sync pending"); assert.equal(h.calls.length, 1);
   const fallback = harness(path => path === "/issues" ? response(undefined, 201, { Location: "/api/v1/issues/21", "X-QStar-Reference": "3021" }, true)
     : response(undefined, 201, { Location: "https://api.example.com/api/v1/issues/1/progress/72" }, true));
-  const created = await fallback.service.createIssue({ shortSummary: "Submitted" });
-  assert.equal(created.id, 21); assert.equal(created.qsNumber, 3021); assert.equal(created.eTag, undefined); assert.ok(created.saveWarning);
-  const note = await fallback.service.addProgressLogEntry(1, { text: "  Observation  ", author: "Forged", ts: "1900-01-01" });
-  assert.equal(note.id, 72); assert.equal(note.ts, ""); assert.equal(note.author, ""); assert.ok(note.saveWarning);
+  await assert.rejects(fallback.service.createIssue({ shortSummary: "Submitted" }), (error: unknown) => {
+    assert.ok(error instanceof AcceptedWriteError);
+    assert.deepEqual(error.identity, { issueId: 21, qsNumber: 3021 });
+    return true;
+  });
+  await assert.rejects(fallback.service.addProgressLogEntry(1, { text: "  Observation  ", author: "Forged", ts: "1900-01-01" }), (error: unknown) => {
+    assert.ok(error instanceof AcceptedWriteError);
+    assert.deepEqual(error.identity, { issueId: 1, entryId: 72 });
+    return true;
+  });
   assert.deepEqual(fallback.calls[1].body, { text: "Observation" }); assert.equal(fallback.calls.length, 2);
 });
 
@@ -128,7 +134,11 @@ test("diagnostics validate returned checks and canonical regions preserve legacy
 
 test("progress header-only identity is recoverable and inconsistent receipts remain quarantined", async () => {
   const good = harness(() => response(undefined, 201, { "X-QStar-Entry-Id": "72" }, true));
-  assert.equal((await good.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" })).id, 72);
+  await assert.rejects(good.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" }), (error: unknown) => {
+    assert.ok(error instanceof AcceptedWriteError);
+    assert.deepEqual(error.identity, { issueId: 1, entryId: 72 });
+    return true;
+  });
   for (const headers of [
     { "X-QStar-Entry-Id": "72", Location: "/issues/1/progress/73" },
     { "X-QStar-Entry-Id": "72", Location: "/issues/2/progress/72" },
@@ -137,5 +147,36 @@ test("progress header-only identity is recoverable and inconsistent receipts rem
     const h = harness(() => response(undefined, 201, headers, true));
     await assert.rejects(h.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" }), AcceptedWriteError);
     assert.equal(h.calls.length, 1);
+  }
+});
+
+test("invalid accepted receipt shapes retain readable body identities in guarded receipts", async () => {
+  const h = harness(path => response(path === "/issues" ? { id: 21 } : { id: 72, text: "Saved" }, 201));
+  await assert.rejects(h.service.createIssue({ shortSummary: "Submitted" }), (error: unknown) => {
+    assert.ok(error instanceof AcceptedWriteError);
+    assert.equal(error.identity.issueId, 21);
+    assert.equal(error.identity.qsNumber, undefined);
+    return true;
+  });
+  await assert.rejects(h.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" }), (error: unknown) => {
+    assert.ok(error instanceof AcceptedWriteError);
+    assert.deepEqual(error.identity, { issueId: 1, entryId: 72 });
+    return true;
+  });
+  assert.equal(h.calls.length, 2);
+});
+
+test("backend POST rejection and unknown network outcomes never produce accepted receipts", async () => {
+  for (const failure of [new SyntaxError("Transport unavailable"), 403, 500, 307]) {
+    const h = harness(() => { if (failure instanceof Error) throw failure; return response(undefined, failure, {}, true); });
+    for (const submit of [() => h.service.createIssue({ shortSummary: "Rejected" }), () => h.service.addProgressLogEntry(1, { text: "Rejected", author: "", ts: "" })]) {
+      await assert.rejects(submit(), (error: unknown) => {
+        assert.equal(error instanceof AcceptedWriteError, false);
+        if (failure instanceof Error) assert.equal(error, failure);
+        else assert.match((error as Error).message, new RegExp(String(failure)));
+        return true;
+      });
+    }
+    assert.equal(h.calls.length, 2);
   }
 });
