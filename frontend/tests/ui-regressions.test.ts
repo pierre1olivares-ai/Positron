@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, afterEach, beforeEach, test } from "node:test";
 import type { IIssue, IProgressLogEntry } from "../src/webparts/qstarIssueManager/models/IIssue";
-import { IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
+import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
 import { addCalendarDays, todayDate } from "../src/webparts/qstarIssueManager/domain/calendarDates";
 
 const { JSDOM } = require("jsdom");
@@ -30,11 +30,13 @@ const { act, Simulate } = require("react-dom/test-utils") as typeof import("reac
 const Module = require("node:module");
 const originalLoad = Module._load;
 Module._load = function (request: string, ...args: unknown[]): unknown {
-  return /\.(scss|css)$/.test(request) ? {} : originalLoad.call(this, request, ...args);
+  return /\.(scss|css)$/.test(request) ? {} : request === "@microsoft/sp-http" ? { AadHttpClient: { configurations: { v1: {} } } } : originalLoad.call(this, request, ...args);
 };
 const {
   default: App, QMIssueDetail, OwnerIssueDetail, TriageForm, ReporterForm, ProgressLog, SettingsView, Dashboard,
 } = require("../src/webparts/qstarIssueManager/components/QstarPrototype");
+const { BackendApiDataService } = require("../src/webparts/qstarIssueManager/services/BackendApiDataService");
+const { default: QstarIssueManager } = require("../src/webparts/qstarIssueManager/components/QstarIssueManager");
 Module._load = originalLoad;
 
 let container: HTMLDivElement;
@@ -1881,4 +1883,172 @@ test("owner recovery survives reassignment away and back, matching fresh writes,
   assert.equal(recoveryPanel(), null);
   assert.equal(writes, 2);
   assert.equal(appends, 3);
+});
+
+
+function acceptedBackendHarness(operation: "create" | "progress", headers = false) {
+  const state = { issues: [issue()], writes: [] as any[], failReload: false };
+  const response = (value: unknown, status = 200, receiptHeaders: Record<string, string> = {}, malformed = false) => ({
+    ok: true, status, statusText: "", headers: { get: (name: string) => receiptHeaders[name] || null },
+    json: async () => { if (malformed) throw new Error("Invalid JSON"); return value; },
+  });
+  const service = new BackendApiDataService({ request: async (path: string, method = "GET", body?: any) => {
+    if (method === "GET") {
+      if (state.failReload) throw new Error("Readback unavailable");
+      return response(path === "/settings" ? { msFormUrl: "", flowId: "", access: [] } : path === "/issues" ? state.issues : state.issues[0]);
+    }
+    state.writes.push({ path, body });
+    if (operation === "create") {
+      const saved = issue({ ...body, id: 20 + state.writes.length, qsNumber: 3020 + state.writes.length, progressLog: [] });
+      state.issues.push(saved);
+      return response(saved, 201, headers ? { Location: `/issues/${saved.id}`, "X-QStar-Reference": String(saved.qsNumber) } : {}, state.writes.length === 1);
+    }
+    const saved = { id: 70 + state.writes.length, author: "API user", authorId: 7, authorEmail: "api@example.com", ts: "2026-09-28T12:00:00Z", text: body.text };
+    state.issues[0] = { ...state.issues[0], progressLog: [...state.issues[0].progressLog, saved] };
+    return response(saved, 201, headers ? { Location: `/issues/1/progress/${saved.id}` } : {}, state.writes.length === 1);
+  } });
+  const props = { dataService: service, connection: { dataSourceMode: "backend", backendBaseUrl: `https://api.example.com/${operation}-${headers}`, siteUrl: "https://tenant.sharepoint.com/sites/api", issuesListName: "API Issues", progressListName: "API Journal", betaAccessMode: false } };
+  return { state, props };
+}
+
+test("malformed accepted create consumes only the submitted form and blocks resubmit across navigation/remount until successful recovery", async () => {
+  const { state, props } = acceptedBackendHarness("create");
+  await renderApp({}, [], props);
+  await click("Report"); fillReport(); await click("Submit report");
+  assert.equal(state.writes.length, 1); assert.equal(field("Short summary *").value, "");
+  assert.equal(button("Submit report").disabled, true); assert.match(container.textContent || "", /submission was saved/);
+  assert.doesNotMatch(container.textContent || "", /change failed and was not saved/);
+  await click("Issue register"); await click("Report"); assert.equal(button("Submit report").disabled, true);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Report"); assert.equal(button("Submit report").disabled, true);
+  state.failReload = true; await click("Reload saved data"); assert.equal(button("Submit report").disabled, true);
+  state.failReload = false; await click("Reload saved data");
+  assert.equal(field("Short summary *").value, ""); assert.equal(button("Submit report").disabled, true);
+  fillReport(); change("Short summary *", "Deliberate new report"); await click("Submit report");
+  assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.shortSummary, "Deliberate new report");
+});
+
+test("malformed accepted progress survives issue reopen/remount, preserves unrelated detail and needs fresh text after recovery", async () => {
+  const { state, props } = acceptedBackendHarness("progress");
+  await renderApp({}, [], props); await click("Issue register"); await openIssue();
+  change("Follow up (Quality Team notes)", "Unsubmitted independent detail");
+  writeProgress("Accepted observation"); await click("Add update");
+  assert.equal(state.writes.length, 1); assert.equal(button("Add update").disabled, true);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted independent detail");
+  await click("Back to register"); await openIssue(); assert.equal(button("Add update").disabled, true);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Issue register"); await openIssue(); assert.equal(button("Add update").disabled, true);
+  state.failReload = true; await click("Reload saved data"); assert.equal(button("Add update").disabled, true);
+  state.failReload = false; await click("Reload saved data");
+  const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
+  assert.equal(textarea.value, ""); assert.equal(button("Add update").disabled, true);
+  writeProgress("Deliberate fresh observation"); await click("Add update");
+  assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.text, "Deliberate fresh observation");
+});
+
+test("201 malformed bodies with receipt headers show saved warnings and consume submitted form/note", async () => {
+  const created = acceptedBackendHarness("create", true);
+  await renderApp({}, [], created.props); await click("Report"); fillReport(); await click("Submit report");
+  assert.match(container.textContent || "", /Report submitted/); assert.match(container.textContent || "", /QS-3021/);
+  assert.match(container.textContent || "", /Saved with a warning/); assert.equal(created.state.writes.length, 1);
+  await click("Report another"); assert.equal(field("Short summary *").value, "");
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  const posted = acceptedBackendHarness("progress", true);
+  await renderApp({}, [], posted.props); await click("Issue register"); await openIssue(); writeProgress("Accepted with receipt"); await click("Add update");
+  assert.match(container.textContent || "", /Saved with a warning/); assert.doesNotMatch(container.textContent || "", /Invalid Date/);
+  assert.equal(posted.state.writes.length, 1); assert.equal(button("Add update").disabled, true);
+  assert.equal(container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!.value, "");
+});
+
+test("backend wrapper uses verified caller and connection and never shows stale direct targets", async () => {
+  const dataService = { loadIssues: async () => [], loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }) };
+  const props = { dataService, description: "", isDarkTheme: false, environmentMessage: "", hasTeamsContext: false,
+    userDisplayName: "Stale caller", userEmail: "stale@example.com", connection: { siteUrl: "https://wrong.sharepoint.com", issuesListName: "Wrong", progressListName: "Wrong", betaAccessMode: true },
+    runConnectionDiagnostics: async () => [], roleResolver: { resolve: async () => ({ role: "admin", source: "backend", user: { userId: 7, displayName: "Verified caller", email: "verified@example.com" },
+      connection: { dataSourceMode: "backend", backendBaseUrl: "https://api.example.com/api/v1", siteUrl: "https://right.sharepoint.com/sites/qstar", issuesListName: "Actual Issues", progressListName: "Actual Journal", betaAccessMode: false } }) } };
+  await act(async () => { ReactDOM.render(React.createElement(QstarIssueManager, props), container); });
+  await click("IT settings");
+  assert.match(container.textContent || "", /Verified caller/); assert.match(container.textContent || "", /Actual Issues/); assert.match(container.textContent || "", /right.sharepoint.com/);
+  assert.match(container.textContent || "", /Verified Entra application roles/); assert.doesNotMatch(container.textContent || "", /Stale caller|wrong.sharepoint.com/);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await act(async () => { ReactDOM.render(React.createElement(QstarIssueManager, { ...props, roleResolver: { resolve: async () => ({ role: "admin", source: "backend" }) } }), container); });
+  assert.match(container.textContent || "", /Access is disabled/); assert.doesNotMatch(container.textContent || "", /IT settings/);
+});
+
+test("connection remount ignores a late old /me role and renders only the new verified connection", async () => {
+  const old = deferred<any>();
+  const next = deferred<any>();
+  let oldLoads = 0;
+  const shared = { description: "", isDarkTheme: false, environmentMessage: "", hasTeamsContext: false, userDisplayName: "Page User", userEmail: "page@example.com",
+    connection: { siteUrl: "https://stale.sharepoint.com", issuesListName: "Stale", progressListName: "Stale", betaAccessMode: false },
+    runConnectionDiagnostics: async () => [], dataService: { loadIssues: async () => [], loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }) } };
+  render(QstarIssueManager, { ...shared, key: "old", dataService: { ...shared.dataService, loadIssues: async () => { oldLoads += 1; return []; } }, roleResolver: { resolve: () => old.promise } });
+  render(QstarIssueManager, { ...shared, key: "new", roleResolver: { resolve: () => next.promise } });
+  await act(async () => { old.resolve({ role: "admin", source: "backend", user: { userId: 1, displayName: "Old Admin", email: "old@example.com" }, connection: shared.connection }); });
+  assert.equal(oldLoads, 0); assert.match(container.textContent || "", /Checking your Q-Star access/);
+  await act(async () => { next.resolve({ role: "reader", source: "backend", user: { userId: 2, displayName: "Current Reader", email: "current@example.com" }, connection: { ...shared.connection, siteUrl: "https://current.sharepoint.com", dataSourceMode: "backend" } }); });
+  assert.match(container.textContent || "", /Current Reader/); assert.doesNotMatch(container.textContent || "", /Old Admin|IT settings/);
+});
+
+test("late accepted create consumes its old form while preserving a newer unsubmitted draft", async () => {
+  const accepted = deferred<any>();
+  const submitted: any[] = [];
+  const reply = (value: any, malformed = false) => ({ ok: true, status: 201, statusText: "", headers: { get: () => null }, json: async () => { if (malformed) throw new Error("Unreadable"); return value; } });
+  const service = new BackendApiDataService({ request: async (path: string, method = "GET", body?: any) => {
+    if (method === "GET") return reply(path === "/settings" ? {} : []);
+    submitted.push(body);
+    return submitted.length === 1 ? accepted.promise : reply(issue({ ...body, id: 2, qsNumber: 3002 }));
+  } });
+  await renderApp({}, [], { dataService: service, userEmail: "late-create@example.com" });
+  await click("Report"); fillReport(); await click("Submit report");
+  await click("Issue register"); await click("Report"); fillReport(); change("Short summary *", "Newer unsubmitted report");
+  await act(async () => { accepted.resolve(reply(undefined, true)); });
+  assert.equal(field("Short summary *").value, "Newer unsubmitted report"); assert.equal(button("Submit report").disabled, true);
+  await click("Reload saved data"); assert.equal(field("Short summary *").value, "Newer unsubmitted report");
+  await click("Submit report"); assert.equal(submitted.length, 2); assert.equal(submitted[1].shortSummary, "Newer unsubmitted report");
+});
+
+test("a recovery read cannot clear another issue's newer accepted-write quarantine", async () => {
+  const delayed = deferred<IIssue[]>();
+  let reads = 0;
+  const writes: number[] = [];
+  const initial = [issue(), issue({ id: 2, qsNumber: 1002 })];
+  const userEmail = "recovery-race@example.com";
+  const service = {
+    loadIssues: async () => { reads += 1; return reads === 2 ? delayed.promise : initial; },
+    addProgressLogEntry: async (id: number) => { writes.push(id); throw new AcceptedWriteError("progress"); },
+  };
+  await renderApp(service, initial, { userEmail }); await click("Issue register"); await openIssue(1001);
+  writeProgress("First accepted observation"); await click("Add update");
+  await click("Reload saved data");
+  await click("Back to register"); await openIssue(1002); writeProgress("Second accepted observation"); await click("Add update");
+  await act(async () => { delayed.resolve(initial); });
+  assert.equal(button("Add update").disabled, true); assert.match(container.textContent || "", /Second accepted observation/);
+  assert.ok(button("Reload saved data")); assert.deepEqual(writes, [1, 2]);
+  await click("Back to register"); await openIssue(1001);
+  const firstText = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
+  assert.equal(firstText.disabled, false); assert.equal(firstText.value, "");
+  await click("Reload saved data");
+  await click("Back to register"); await openIssue(1002);
+  assert.equal(container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!.value, "");
+  assert.equal(button("Add update").disabled, true);
+});
+
+test("an accepted response arriving after App remount still quarantines the current connection", async () => {
+  const pending = deferred<any>();
+  let writes = 0;
+  const response = (value: any, malformed = false) => ({ ok: true, status: 201, statusText: "", headers: { get: () => null }, json: async () => { if (malformed) throw new Error("Malformed receipt"); return value; } });
+  const dataService = new BackendApiDataService({ request: async (path: string, method = "GET") => {
+    if (method === "GET") return response(path === "/settings" ? {} : []);
+    writes += 1; return pending.promise;
+  } });
+  const props = { dataService, userEmail: "remount-inflight@example.com" };
+  await renderApp({}, [], props); await click("Report"); fillReport(); await click("Submit report");
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Report"); fillReport(); change("Short summary *", "Unsubmitted newer report");
+  await act(async () => { pending.resolve(response(undefined, true)); });
+  assert.equal(writes, 1); assert.equal(button("Submit report").disabled, true);
+  assert.equal(field("Short summary *").value, "Unsubmitted newer report");
+  await click("Reload saved data");
+  assert.equal(field("Short summary *").value, "Unsubmitted newer report"); assert.equal(button("Submit report").disabled, false);
 });

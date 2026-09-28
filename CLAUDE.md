@@ -9,7 +9,7 @@ A quality‑issue management tool for **time:matters** (logistics; Lufthansa Car
 - A **working prototype** exists as a **single‑file React app**: [`frontend/prototype/qstar-issue-manager.jsx`](frontend/prototype/qstar-issue-manager.jsx). It currently persists to an injected `window.storage` shim (browser localStorage in the standalone build).
 - A **self‑contained preview** exists: [`frontend/prototype/qstar-live.html`](frontend/prototype/qstar-live.html) (React + Recharts + Lucide bundled; Tailwind via a public CDN — see constraint below).
 - The prototype is feature‑complete for review and has been validated with the Quality team.
-- The repo is split into `frontend/` (SPFx web part) and `backend/` (SharePoint List + Power Automate — see `backend/README.md`).
+- The repo is split into `frontend/` (SPFx web part) and `backend/` (SharePoint lists, Power Automate, and an optional Java gateway — see `backend/README.md`).
 - The running implementation and supported development toolchain are documented in [frontend/README.md](frontend/README.md). Current repair rollout and validation limits are in [the repair handoff](docs/qstar-review-repairs.md); tenant deployment and acceptance remain pending.
 
 ## Changes made
@@ -27,6 +27,10 @@ This section records the approved design decision. Implementation status is reco
 - Standardize people fields as native SharePoint Person columns. Read expanded identity values (`Id`, display name, email) and write lookup IDs such as `TaskOwnerId`; do not mix that mode with optional `*Email` text companion columns.
 - Remove production dependence on the prototype's email-to-role table and its tenant/client-ID settings. They may remain only in an explicitly marked local demo build.
 
+### Optional backend mode
+
+The Java 21 service under `backend/service/` uses a delegated on-behalf-of token for SharePoint REST. Its API validates the caller's tenant, issuer, audience, scope, and explicit app roles, then applies ownership and lifecycle checks. Backend-mode presentation uses the service's `/me` identity, role, and configured connection. Direct mode retains the SharePoint group design above. The backend is disabled by default; the [service guide](backend/service/README.md) owns activation requirements. Do not substitute app-only access when delegated access fails.
+
 ### Implementation handoff
 
 See [frontend/README.md](frontend/README.md) for the implemented app, [the integration contract](backend/sharepoint/qstar-sharepoint-graph-integration.md) for data semantics, and [the repair handoff](docs/qstar-review-repairs.md) for deployment order and evidence limits. The July handoff is retained as a dated [change log](docs/qstar-beta-change-log.md).
@@ -37,9 +41,9 @@ Complete the [implementation checklist](docs/qstar-implementation-checklist.md) 
 
 ### Hard constraints for production
 - **No public‑internet calls.** Bundle all assets locally (the preview's Tailwind CDN must be removed). The app must load nothing from external sites.
-- **Contained to one site.** If Graph is used, request **`Sites.Selected`** scoped to the Q‑Star site only — never tenant‑wide scopes.
-- **No secrets in the front‑end.** Use the user's delegated identity.
-- **Data stays in the tenant** (SharePoint List).
+- **Contained to one site.** If Graph is used, request **`Sites.Selected`** scoped to the Q‑Star site only — never tenant‑wide scopes. Backend REST activation also requires a verified narrowly scoped delegated permission. A pinned site URL does not itself prove that the token is limited to that site. Keep the backend disabled until IT verifies this boundary; broader consent requires an explicit architecture exception.
+- **No secrets in the front‑end.** Use the user's delegated identity. Backend credentials stay server-side and are used only to exchange the authenticated caller's token; no app-only fallback.
+- **Data stays in the tenant** (SharePoint remains the system of record; Q-Star requires no separate business database).
 
 ## Domain notes Claude Code should know
 - **Roles & tabs:** Admin (full + IT settings), Quality Manager (full, no IT), Task Owner (My tasks first; Dashboard, Register, Reminders), Reader (Dashboard only).
@@ -51,6 +55,7 @@ Complete the [implementation checklist](docs/qstar-implementation-checklist.md) 
 ## Repo structure
 - `frontend/prototype/qstar-issue-manager.jsx` — the historical UI reference; the running implementation is in `frontend/src/`.
 - `frontend/prototype/qstar-live.html` — clickable preview for demos/requirements.
+- `backend/service/` — the optional Java gateway, API contract, security configuration, and local tests.
 - `backend/sharepoint/qstar-sharepoint-graph-integration.md` — SharePoint List column map + the read/write data layer design.
 - `backend/sharepoint/provisioning/README.md` — beta/production entry points, schema upgrades, reviewed data migrations, and permissions.
 - `backend/power-automate/qstar-power-automate-flows.md` — step‑by‑step build of the intake + reminder flows.

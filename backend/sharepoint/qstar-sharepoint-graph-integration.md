@@ -1,6 +1,6 @@
 # Q-Star — SharePoint integration contract
 
-The SPFx web part uses SharePoint REST through PnPjs with the signed-in user's same-site permissions. No separate Graph data layer or custom API server is involved. Microsoft Forms intake, scheduled notifications, and assignment ACL reconciliation require the tenant flows in the [workflow guide](../power-automate/qstar-power-automate-flows.md); those flows are manual deployment instructions, not installed components.
+The SPFx web part defaults to SharePoint REST through PnPjs with the signed-in user's same-site permissions. Optional backend mode uses the [Java gateway](../service/README.md) and delegated on-behalf-of SharePoint REST access. It remains disabled until its tenant permission and activation checks pass. Both paths use the schema below. Microsoft Forms intake, scheduled notifications, and assignment ACL reconciliation require the tenant flows in the [workflow guide](../power-automate/qstar-power-automate-flows.md); those flows are manual deployment instructions, not installed components.
 
 This document describes the implemented schema. [Provisioning and migrations](provisioning/README.md) and the [workflow guide](../power-automate/qstar-power-automate-flows.md) are the operational instructions. The historical files in `frontend/prototype/` are not the production data service.
 
@@ -27,7 +27,7 @@ A note on **internal names**: SharePoint derives the internal name from the disp
 | `createdBy` | Created by | `ReportedBy` | Native Person | Expanded for reads; written by SharePoint lookup ID. |
 | `reportDate` | Report date | `ReportDate` | Date | |
 | `departmentBU` | Department/Business Unit | `DepartmentBU` | Choice | 23 business units (see §3). |
-| `region` | Region | `Region` | Choice | 6 canonical regions; reviewed migration preserves custom historical values. |
+| `region` | Region | `Region` | Choice | 7 canonical regions; reviewed migration preserves custom historical values. |
 | `alreadyInContact` | Already in Contact | `AlreadyInContact` | Choice (Yes/No) | |
 | `deviationType` | Deviation Type | `DeviationType` | Choice | 8 types. |
 | `issueOrigin` | Origin | `Origin` | Choice | Customer Complaints or Claims / Internal Finding. |
@@ -120,11 +120,12 @@ For reference when creating the choice columns (and when validating in the form/
 
 - Native Person reads expand identity fields. Writes resolve the tenant user and use lookup IDs; text-plus-email schemas are rejected by provisioning.
 - Reference allocation and its immutable Config field are defined in [Stable QS references](provisioning/README.md#stable-qs-references). A failed number-materialization write must resume the existing item, not repeat intake.
-- Config contains one settings item. SettingsJson holds the Forms link and optional flow ID; retired connection and email-to-role values are discarded by `normalizeSettings`. Site/list targets and beta access mode come from web-part properties, not SettingsJson. Its access rules are in the [permission matrix](provisioning/README.md#journal-migration-and-production-permissions).
+- Config contains one settings item. SettingsJson holds the Forms link and optional flow ID; retired connection and email-to-role values are discarded by `normalizeSettings`. Direct-mode site/list targets and beta access mode come from web-part properties; backend mode uses the server configuration returned by `/me`. Neither comes from SettingsJson. Config access rules are in the [permission matrix](provisioning/README.md#journal-migration-and-production-permissions).
 - Issue editors submit changed fields with the ETag captured for their editing baseline. The service rejects missing/wildcard versions, preserves QS references, and reports HTTP 412 as `IssueConflictError`; it never substitutes a fresh version to force a stale draft through. An accepted update whose readback fails raises `IssueRefreshError` with `saved = true`. Accepted creates and appends instead return a result with `saveWarning` when a follow-up fails. User recovery actions are described in [the README](../../README.md#saving-and-recovering-drafts).
 - Progress appends target the issue folder and use the server-created item and identity. A successful comment needs no separate issue update. QMs/Admins may create a missing folder only when their SharePoint permissions permit; an owner with root Read waits for Flow C.
 - Date-only business values preserve their `yyyy-MM-dd` component. Event timestamps are UTC. Month addition clamps month ends; for example 31 December + two months is the last day of February.
 - Production role resolution controls presentation; SharePoint ACLs enforce access. SharePoint Edit is item-level, not column-level authorization. Reassignment is asynchronous; former access persists until Flow C successfully removes it.
+- The backend additionally validates explicit API roles, current native owner identity, allowed fields, and lifecycle transitions on every write. Backend checks do not make direct SharePoint access column-scoped; users with item Edit rights still have those SharePoint rights. Do not claim that backend validation alone secures all other clients or replaces ACL reconciliation.
 - Same-site list attachments are not implemented by the journal or issue service. Do not promise attachment upload based on the standalone prototype.
 
 ## 5. Notifications

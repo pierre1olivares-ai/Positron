@@ -1,0 +1,210 @@
+buildscript {
+	repositories {
+		mavenCentral()
+	}
+	dependencies {
+		classpath 'org.openapitools:openapi-generator-gradle-plugin:7.2.0'
+	}
+}
+
+
+plugins {
+	id "java"
+	id 'org.springframework.boot' version "3.3.4"
+	id 'org.openapi.generator' version '7.2.0'
+	id 'com.diffplug.spotless' version '6.24.0'
+	id 'io.spring.dependency-management' version '1.1.4'
+}
+
+ext {
+	flywayVersion = '10.19.0'
+	flywaySpringTest = '10.0.0'
+	log4jVersion = '2.22.1'
+	postgresqlVersion = '42.7.4'
+	jdbi3Version = '3.45.4'
+	mapstructVersion = '1.6.2'
+	logbookVersion = '3.9.0'
+	lombokVersion = '1.18.34'
+	lombokMapstructBindingVersion = '0.2.0'
+	embeddedDatabaseVersion = '2.5.1'
+	embeddedPostgresVersion = '2.0.7'
+	janinoVersion = '3.1.12'
+	activeDirectoryVersion = '5.17.1'
+	remapVersion = '4.4.1'
+	bugsnagVersion = '3.7.2'
+
+}
+
+
+spotless {
+	format 'misc', {
+		target '**/*.gradle', '**/.gitignore'
+
+		trimTrailingWhitespace()
+		indentWithTabs()
+		endWithNewline()
+	}
+
+	java {
+		// Generated OpenAPI sources are reproducible outputs, not formatter inputs.
+		target 'src/*/java/**/*.java'
+		importOrder 'java', 'javax', 'org', 'com', 'com.timematters.', ''
+		removeUnusedImports()
+		googleJavaFormat('1.19.2').aosp()
+	}
+}
+
+// The template's openApiGenerate task (below) wrote to $buildDir/generated but
+// nothing fed that into the compiled sourceSet or ran it before compileJava —
+// in practice you'd have to run it by hand and paste the output into
+// src/main/java (that's how the template's own SampleApi.java example ended
+// up committed, per its @Generated codegen timestamp). Wired properly here so
+// the Api interface + *ATO models regenerate from api-contract/contract.yaml
+// on every build instead of needing to be hand-copied in.
+sourceSets.main.java.srcDirs += ["src/main/java", "$buildDir/generated/src/main/java"]
+
+
+group = 'com.timematters'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = "21"
+targetCompatibility = "21"
+
+
+
+configurations {
+	developmentOnly
+	runtimeClasspath {
+		extendsFrom developmentOnly
+	}
+}
+
+springBoot {
+	buildInfo()
+}
+
+repositories {
+	mavenCentral()
+}
+
+
+
+dependencies {
+	implementation "org.springframework.boot:spring-boot-starter-web"
+	implementation "org.springframework.boot:spring-boot-starter-jdbc"
+	implementation "org.springframework.boot:spring-boot-starter-security"
+	implementation "org.springframework.boot:spring-boot-starter-oauth2-resource-server"
+	implementation "org.springframework.boot:spring-boot-starter-oauth2-client"
+
+	implementation "com.azure.spring:spring-cloud-azure-starter-active-directory:$activeDirectoryVersion"
+	implementation "com.azure.spring:spring-cloud-azure-autoconfigure:$activeDirectoryVersion"
+
+	implementation "org.flywaydb:flyway-core:$flywayVersion"
+	implementation "org.postgresql:postgresql:$postgresqlVersion"
+	implementation "org.jdbi:jdbi3-core:$jdbi3Version"
+	implementation "org.jdbi:jdbi3-sqlobject:$jdbi3Version"
+	implementation "org.jdbi:jdbi3-postgres:$jdbi3Version"
+	implementation "org.jdbi:jdbi3-jackson2:$jdbi3Version"
+	implementation "org.mapstruct:mapstruct:$mapstructVersion"
+	// The template's mapper classes (SimpleATOMapper, ComplexSampleMapper,
+	// GenericError.toErrorResponse) are written against com.remondis.remap,
+	// but that dependency was missing from this file as shipped in the
+	// template zip (only MapStruct was wired up, unused by any example code).
+	// Added so the template's own mapping code actually compiles.
+	implementation "com.remondis:remap:$remapVersion"
+	// for audit logging
+	implementation "org.zalando:logbook-spring-boot-starter:$logbookVersion"
+	implementation "org.zalando:logbook-json:$logbookVersion"
+	// to enable conditional logging in logback.xml
+	implementation "org.codehaus.janino:janino:$janinoVersion"
+	implementation "org.codehaus.janino:commons-compiler:$janinoVersion"
+	// BugsnagConfig.java references Bugsnag + BugsnagSpringConfiguration; also missing
+	// from the template as shipped.
+	implementation "com.bugsnag:bugsnag:$bugsnagVersion"
+	implementation "com.bugsnag:bugsnag-spring:$bugsnagVersion"
+	// The generated Api interfaces/ATOs use jakarta.validation.* (Spring Boot 3 /
+	// Jakarta EE) — also not wired up in the template as shipped.
+	implementation "org.springframework.boot:spring-boot-starter-validation"
+	implementation "org.openapitools:jackson-databind-nullable:0.2.6"
+
+	compileOnly "org.projectlombok:lombok:$lombokVersion"
+	annotationProcessor "org.mapstruct:mapstruct-processor:$mapstructVersion"
+	annotationProcessor "org.projectlombok:lombok:$lombokVersion"
+	annotationProcessor "org.projectlombok:lombok-mapstruct-binding:$lombokMapstructBindingVersion"
+	developmentOnly "org.springframework.boot:spring-boot-devtools"
+	testImplementation "org.springframework.boot:spring-boot-starter-test"
+	testImplementation "org.springframework.security:spring-security-test"
+	testImplementation "io.zonky.test:embedded-database-spring-test:$embeddedDatabaseVersion"
+	testImplementation "io.zonky.test:embedded-postgres:$embeddedPostgresVersion"
+	testImplementation "org.flywaydb.flyway-test-extensions:flyway-spring-test:$flywaySpringTest"
+	testImplementation "org.junit.jupiter:junit-jupiter"
+	testImplementation "org.mockito:mockito-junit-jupiter"
+}
+
+
+defaultTasks 'clean', 'spotlessApply',  'bootRun'
+
+/*
+Generates frontfacing API
+*/
+openApiGenerate{
+	generatorName = "spring"
+	inputSpec = "$rootDir/${openApiContractPath}".toString()
+	outputDir = "$buildDir/generated".toString()
+	apiPackage = "com.timematters.${appName}.api.controller"
+	invokerPackage = "com.timematters.${appName}.api"
+	modelPackage = "com.timematters.${appName}.api.model"
+	generateAliasAsModel = true
+	templateDir = "$rootDir/openApiTemplate"
+	configFile = "$rootDir/${openApiConfigFilePath}".toString()
+	generateModelTests = true
+	logToStderr = true
+	// The template's config was missing this: without it, the generator also emits a
+	// concrete *ApiController with every method stubbed to NOT_IMPLEMENTED, which — now
+	// that generated sources actually feed into the build (see the sourceSets fix above) —
+	// collides with a hand-written controller of the same name implementing the same
+	// interface. interfaceOnly restricts generation to the Api interface + *ATO models,
+	// which is what the hand-written controller actually implements.
+	configOptions = [
+			dateLibrary: "java8",
+			interfaceOnly: "true",
+			// Also missing from the template as shipped: without this, non-customized
+			// built-in templates (e.g. ApiUtil.java) still emit javax.servlet.* instead
+			// of jakarta.servlet.*, which doesn't exist on a Spring Boot 3 classpath.
+			// The 3 customized templates (api/apiController/model.mustache) had their
+			// javax.validation.* hardcoded too, and needed fixing directly since they
+			// don't reference this flag at all — see openApiTemplate/README.md.
+			useJakartaEe: "true"
+	]
+	typeMappings =  [
+			DateTime: "java.time.LocalDateTime"
+	]
+}
+
+
+
+compileJava.dependsOn tasks.openApiGenerate
+
+bootJar {
+	enabled = true
+}
+
+//disable plain.jar building
+jar {
+	enabled = false
+}
+
+compileJava {
+	options.annotationProcessorPath = configurations.annotationProcessor
+}
+
+dependencyManagement {
+	imports {
+		mavenBom "com.azure.spring:spring-cloud-azure-dependencies:$activeDirectoryVersion"
+	}
+}
+
+test {
+	useJUnitPlatform {
+		includeEngines 'junit-jupiter'
+	}
+}

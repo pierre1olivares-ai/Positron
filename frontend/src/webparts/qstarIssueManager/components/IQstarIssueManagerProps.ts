@@ -2,12 +2,8 @@ import { IDataService } from "../services/IDataService";
 import { ICheckResult } from "../services/ConnectionDiagnosticsService";
 import { IRoleResolver } from "../services/IRoleResolver";
 
-export interface IQstarConnection {
-  siteUrl: string;
-  issuesListName: string;
-  progressListName: string;
-  betaAccessMode: boolean;
-}
+import { IQstarConnection } from "../models/IConnection";
+export { IQstarConnection } from "../models/IConnection";
 
 export interface IQstarIssueManagerProps {
   description: string;

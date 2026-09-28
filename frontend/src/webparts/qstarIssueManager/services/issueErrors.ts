@@ -1,5 +1,18 @@
 import { IIssue } from "../models/IIssue";
 
+/** HTTP accepted the append, but the response did not identify its saved record. */
+export class AcceptedWriteError extends Error {
+  public readonly saved = true;
+  public readonly code = "ACCEPTED_WRITE";
+
+  constructor(public readonly operation: "create" | "progress") {
+    super("Your submission was saved, but its receipt could not be read. Reload saved data before submitting anything else; do not submit the same content again.");
+    this.name = "AcceptedWriteError";
+    (Object as ObjectConstructor & { setPrototypeOf(target: object, prototype: object): object })
+      .setPrototypeOf(this, AcceptedWriteError.prototype);
+  }
+}
+
 export class IssueConflictError extends Error {
   public readonly code = "ISSUE_CONFLICT";
 

@@ -8,7 +8,9 @@ import { REGIONS, normalizeRegion } from "../domain/referenceData";
 import { formatLocalDate, normalizeDateOnly, addCalendarDays, addCalendarMonths, calendarDaysBetween, sameCalendarDay, isDateInYearThroughToday } from "../domain/calendarDates";
 import { buildIssueTransition, reopenIssuePatch } from "../domain/issueLifecycle";
 import { changedIssueFields } from "../domain/issueDraft";
-import { IssueConflictError, IssueRefreshError } from "../services/issueErrors";
+import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../services/issueErrors";
+import { readAcceptedReceipts, subscribeAcceptedReceipts, writeAcceptedReceipts } from "../domain/acceptedWriteRecovery";
+import type { IQstarConnection } from "../models/IConnection";
 import "./QstarPrototype.scss";
 import {
   LayoutDashboard, Inbox, ClipboardList, BellRing, ListChecks, Send,
@@ -60,7 +62,7 @@ const fmtDate = (d) => {
   const date = iso(d);
   return date ? new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 };
-const fmtDateTime = (d) => new Date(d).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+const fmtDateTime = (d) => d ? new Date(d).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "Awaiting server details";
 
 /* ---------- Derived state helpers ---------- */
 const ACTIVE_STATUSES = ["Created", "In Progress", "On Hold", NC_TEST];
@@ -941,20 +943,26 @@ function Register({ issues, onOpen, filter, setFilter }) {
 /* ============================================================
    Progress log (append-only UI; enforcement depends on SharePoint ACLs)
    ============================================================ */
-export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange }) {
+export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange, acceptedReceipt }) {
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const submit = async () => {
-    if (disabled || saving || !text.trim()) return;
+    if (disabled || acceptedReceipt || saving || !text.trim()) return;
+    const submittedText = text.trim();
     setSaving(true);
     setError("");
     try {
-      await onAdd({ ts: new Date().toISOString(), author, text: text.trim() });
-      setText("");
+      await onAdd({ ts: new Date().toISOString(), author, text: submittedText });
+      if (!mounted.current) return;
+      setText((current) => current.trim() === submittedText ? "" : current);
     } catch (failure) {
+      if (!mounted.current) return;
+      if (failure instanceof AcceptedWriteError) setText((current) => current.trim() === submittedText ? "" : current);
       setError(failure instanceof Error ? failure.message : String(failure));
-    } finally { setSaving(false); }
+    } finally { if (mounted.current) setSaving(false); }
   };
   const sorted = [...(entries || [])].sort((a, b) => new Date(b.ts) - new Date(a.ts));
   return (
@@ -962,10 +970,11 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, 
       <SectionTitle icon={ListChecks} right={<span className="inline-flex items-center gap-1 text-xs text-slate-400"><Lock size={12} />Timestamped · cannot be edited or deleted</span>}>Progress log</SectionTitle>
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <TextArea disabled={disabled || saving} value={text} onChange={(e) => { setText(e.target.value); onDraftChange?.(e.target.value); }} placeholder="What did you do? What are the next steps or blockers?" />
+          {acceptedReceipt && <p role="status" className="mb-2 text-sm text-amber-800">{acceptedReceipt.message} Submitted note: {acceptedReceipt.submitted}</p>}
+          <TextArea disabled={disabled || saving || !!acceptedReceipt} value={text} onChange={(e) => { setText(e.target.value); onDraftChange?.(e.target.value); }} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
-            <Btn disabled={disabled || !text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
+            <Btn disabled={disabled || !!acceptedReceipt || !text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
           </div>
           {error && <p role="alert" className="mt-2 text-sm text-rose-700">{error}</p>}
         </div>
@@ -1169,7 +1178,7 @@ function NCTestBanner({ i }) {
 /* ============================================================
    QM Issue detail (full edit)
    ============================================================ */
-export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false, onDraftChange }) {
+export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false, onDraftChange, acceptedProgress }) {
   const [d, setD] = useState(issue);
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
@@ -1290,7 +1299,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -1435,7 +1444,9 @@ export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = fals
 /* ============================================================
    Reporter intake form (mirrors Q-Star)
    ============================================================ */
-export function ReporterForm({ onSubmit, settings, reporterName }) {
+export function ReporterForm({ onSubmit, settings, reporterName, acceptedReceipt }) {
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
   const blank = { shortSummary: "", description: "", immediateAction: "", severity: "", createdBy: reporterName, departmentBU: "", region: "", alreadyInContact: "", deviationType: "", issueOrigin: "", additionalComments: "", attachments: [] };
   const [f, setF] = useState(blank);
   const [done, setDone] = useState(null);
@@ -1446,17 +1457,21 @@ export function ReporterForm({ onSubmit, settings, reporterName }) {
   const formUrl = settings?.msFormUrl;
 
   const submit = async () => {
-    if (submitting || !valid) return;
+    if (submitting || acceptedReceipt || !valid) return;
+    const submitted = f;
     setSubmitting(true);
     setSubmitError("");
     try {
       const qs = await onSubmit(f);
+      if (!mounted.current) return;
       setDone(qs);
       setF(blank);
     } catch (error) {
+      if (!mounted.current) return;
+      if (error instanceof AcceptedWriteError) setF((current) => current === submitted ? blank : current);
       setSubmitError(error instanceof Error ? error.message : String(error));
     } finally {
-      setSubmitting(false);
+      if (mounted.current) setSubmitting(false);
     }
   };
 
@@ -1480,22 +1495,23 @@ export function ReporterForm({ onSubmit, settings, reporterName }) {
         </a>
       )}
       <div className="space-y-3">
-        <Field label="Short summary *"><TextInput disabled={submitting} value={f.shortSummary} onChange={(e) => set("shortSummary", e.target.value)} placeholder="One line describing the issue" /></Field>
-        <Field label="Description *"><TextArea disabled={submitting} value={f.description} onChange={(e) => set("description", e.target.value)} placeholder="What happened, where, and when?" /></Field>
-        <Field label="Immediate action taken"><TextArea disabled={submitting} value={f.immediateAction} onChange={(e) => set("immediateAction", e.target.value)} placeholder="Any containment already done?" /></Field>
+        <Field label="Short summary *"><TextInput disabled={submitting || !!acceptedReceipt} value={f.shortSummary} onChange={(e) => set("shortSummary", e.target.value)} placeholder="One line describing the issue" /></Field>
+        <Field label="Description *"><TextArea disabled={submitting || !!acceptedReceipt} value={f.description} onChange={(e) => set("description", e.target.value)} placeholder="What happened, where, and when?" /></Field>
+        <Field label="Immediate action taken"><TextArea disabled={submitting || !!acceptedReceipt} value={f.immediateAction} onChange={(e) => set("immediateAction", e.target.value)} placeholder="Any containment already done?" /></Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Severity *"><Select disabled={submitting} value={f.severity} onChange={(e) => set("severity", e.target.value)} options={SEVERITIES} /></Field>
+          <Field label="Severity *"><Select disabled={submitting || !!acceptedReceipt} value={f.severity} onChange={(e) => set("severity", e.target.value)} options={SEVERITIES} /></Field>
           <Field label="Reported by" hint="Your signed-in Microsoft 365 identity"><TextInput value={reporterName} readOnly /></Field>
-          <Field label="Department / Business Unit *"><Select disabled={submitting} value={f.departmentBU} onChange={(e) => set("departmentBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
-          <Field label="Region *"><Select disabled={submitting} value={f.region} onChange={(e) => set("region", e.target.value)} options={REGIONS} /></Field>
-          <Field label="Deviation type *"><Select disabled={submitting} value={f.deviationType} onChange={(e) => set("deviationType", e.target.value)} options={DEVIATION_TYPES} /></Field>
-          <Field label="Where does it come from? *"><Select disabled={submitting} value={f.issueOrigin} onChange={(e) => set("issueOrigin", e.target.value)} options={ORIGINS} /></Field>
-          <Field label="Already in contact with the dept?"><Select disabled={submitting} value={f.alreadyInContact} onChange={(e) => set("alreadyInContact", e.target.value)} options={YESNO} /></Field>
+          <Field label="Department / Business Unit *"><Select disabled={submitting || !!acceptedReceipt} value={f.departmentBU} onChange={(e) => set("departmentBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
+          <Field label="Region *"><Select disabled={submitting || !!acceptedReceipt} value={f.region} onChange={(e) => set("region", e.target.value)} options={REGIONS} /></Field>
+          <Field label="Deviation type *"><Select disabled={submitting || !!acceptedReceipt} value={f.deviationType} onChange={(e) => set("deviationType", e.target.value)} options={DEVIATION_TYPES} /></Field>
+          <Field label="Where does it come from? *"><Select disabled={submitting || !!acceptedReceipt} value={f.issueOrigin} onChange={(e) => set("issueOrigin", e.target.value)} options={ORIGINS} /></Field>
+          <Field label="Already in contact with the dept?"><Select disabled={submitting || !!acceptedReceipt} value={f.alreadyInContact} onChange={(e) => set("alreadyInContact", e.target.value)} options={YESNO} /></Field>
         </div>
-        <Field label="Additional comments (optional)"><TextArea disabled={submitting} value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
+        <Field label="Additional comments (optional)"><TextArea disabled={submitting || !!acceptedReceipt} value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
         <Field label="Attachment" hint="Attachments are not supported by this form yet."><div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-400"><Paperclip size={15} />File upload unavailable</div></Field>
-        {submitError && <p className="text-sm text-rose-700">Could not submit: {submitError}</p>}
-        <div className="flex justify-end pt-1"><Btn onClick={submit} disabled={!valid || submitting}><Send size={15} />{submitting ? "Submitting…" : "Submit report"}</Btn></div>
+        {acceptedReceipt && <p role="status" className="text-sm text-amber-800">{acceptedReceipt.message} Submitted report: {acceptedReceipt.submitted}</p>}
+        {submitError && !acceptedReceipt && <p className="text-sm text-rose-700">{submitError}</p>}
+        <div className="flex justify-end pt-1"><Btn onClick={submit} disabled={!valid || submitting || !!acceptedReceipt}><Send size={15} />{submitting ? "Submitting…" : "Submit report"}</Btn></div>
         {!valid && <p className="text-right text-xs text-slate-400">Fields marked * are required.</p>}
       </div>
     </Card>
@@ -1506,6 +1522,7 @@ export function ReporterForm({ onSubmit, settings, reporterName }) {
    Admin · IT settings (connect MS Form + SharePoint)
    ============================================================ */
 export function SettingsView({ settings, onSave, onRunDiagnostics, connection }) {
+  const backend = connection?.dataSourceMode === "backend";
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const save = async () => {
@@ -1541,7 +1558,7 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
         <div className="flex items-center gap-2 text-sm tm-text-navy">
           <KeyRound size={16} />
           <strong>Admin · IT settings.</strong>
-          Authentication uses the signed-in Microsoft 365 identity. Roles are maintained in the four Q-Star SharePoint groups.
+          {backend ? "Authentication uses the signed-in Microsoft 365 identity. The backend verifies assigned Entra application roles." : "Authentication uses the signed-in Microsoft 365 identity. Roles are maintained in the four Q-Star SharePoint groups."}
         </div>
       </Card>
 
@@ -1567,20 +1584,22 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
       <Card className="p-5">
         <SectionTitle icon={Building2}>SharePoint connection</SectionTitle>
         <p className="mb-3 text-sm text-slate-600">
-          The web part uses its configured site and Lists through the signed-in user's SharePoint session. No client secret or app registration is needed for same-site data.
+          {backend ? "The backend accesses its configured SharePoint site as the signed-in user. The connection shown here is reported by the backend." : "The web part uses its configured site and Lists through the signed-in user's SharePoint session. No client secret or app registration is needed for same-site data."}
         </p>
         <dl className="divide-y divide-slate-100">
+          <ReadRow label="Data source" value={backend ? "Backend API" : "SharePoint direct"} />
+          {backend && <ReadRow label="Backend API URL" value={connection.backendBaseUrl} />}
           <ReadRow label="SharePoint site URL" value={connection?.siteUrl || "Local development"} />
           <ReadRow label="Issues list" value={connection?.issuesListName || "Q-Star Issues"} />
           <ReadRow label="Progress list" value={connection?.progressListName || "Q-Star Progress Log"} />
-          <ReadRow label="Access mode" value={connection?.betaAccessMode ? "Beta pilot" : "Production groups"} />
+          <ReadRow label="Access mode" value={backend ? "Verified Entra application roles" : connection?.betaAccessMode ? "Beta pilot" : "Production groups"} />
         </dl>
-        <p className="mt-3 text-xs text-slate-500">To change the connection, edit the SharePoint page and open this web part's properties. Saving settings below changes only the Forms link and flow ID.</p>
+        <p className="mt-3 text-xs text-slate-500">{backend ? "Site and list targets are configured on the backend. Change the API URL or resource in the web part properties." : "To change the connection, edit the SharePoint page and open this web part's properties."} Saving settings below changes only the Forms link and flow ID.</p>
       </Card>
 
       <Card className="p-5">
         <SectionTitle icon={Plug}>Connection diagnostics</SectionTitle>
-        <p className="mb-3 text-sm text-slate-600">Checks site access, the signed-in user, List schema, indexes, and a create/update/delete round trip.</p>
+        <p className="mb-3 text-sm text-slate-600">{backend ? "Checks the backend connection and its configured SharePoint access." : "Checks site access, the signed-in user, List schema, indexes, and a create/update/delete round trip."}</p>
         <Btn onClick={runDiagnostics} disabled={running}><Plug size={15} />{running ? "Running…" : "Run connection test"}</Btn>
         {diagnosticError && <p className="mt-3 text-sm text-rose-700">{diagnosticError}</p>}
         {results && (
@@ -1743,7 +1762,7 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange }) {
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange, acceptedProgress }) {
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
@@ -1818,7 +1837,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               {issue.followUp && <ReadRow label="QM follow-up note" value={<span className="whitespace-pre-wrap">{issue.followUp}</span>} />}
             </dl>
           </Card>
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
+          <Card className="p-4"><ProgressLog acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
         </div>
 
         <div className="lg:col-span-2">
@@ -1869,7 +1888,7 @@ export interface IQstarPrototypeProps {
   userEmail: string;
   developmentMode: boolean;
   onRunDiagnostics: () => Promise<ICheckResult[]>;
-  connection?: { siteUrl: string; issuesListName: string; progressListName: string; betaAccessMode: boolean };
+  connection?: IQstarConnection;
 }
 
 export default function App({
@@ -1892,6 +1911,45 @@ export default function App({
   const [reloadToken, setReloadToken] = useState(0);
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
   const pendingOperations = useRef(new Map());
+  const createPending = useRef(false);
+  const recoveryKey = `qstar-accepted:${JSON.stringify([connection || {}, userEmail])}`;
+  const [acceptedReceipts, setAcceptedReceipts] = useState(() => readAcceptedReceipts(recoveryKey));
+  const acceptedRef = useRef(acceptedReceipts);
+  const appMounted = useRef(true);
+  useEffect(() => {
+    appMounted.current = true;
+    const accept = (receipts) => { acceptedRef.current = receipts; setAcceptedReceipts(receipts); };
+    accept(readAcceptedReceipts(recoveryKey));
+    const unsubscribe = subscribeAcceptedReceipts(recoveryKey, accept);
+    return () => { appMounted.current = false; unsubscribe(); };
+  }, [recoveryKey]);
+  const [recoveringAccepted, setRecoveringAccepted] = useState(false);
+  const [recoveryError, setRecoveryError] = useState("");
+  const saveReceipts = (next) => {
+    acceptedRef.current = next;
+    writeAcceptedReceipts(recoveryKey, next);
+  };
+  const quarantine = (operation, error, submitted) => {
+    saveReceipts({ ...readAcceptedReceipts(recoveryKey), [operation]: { message: error.message, submitted } });
+  };
+  const recoverAcceptedWrites = async () => {
+    if (recoveringAccepted) return;
+    const recoveringReceipts = { ...readAcceptedReceipts(recoveryKey) };
+    setRecoveringAccepted(true); setRecoveryError("");
+    try {
+      await Promise.all(Array.from(pendingOperations.current.values()).map((pending) => pending.catch(() => undefined)));
+      const refreshed = await dataService.loadIssues();
+      if (appMounted.current) setIssues(refreshed);
+      // A different issue may accept a write during this read. Only reconcile
+      // the exact receipts this explicit recovery began with.
+      const remaining = { ...readAcceptedReceipts(recoveryKey) };
+      Object.keys(recoveringReceipts).forEach((key) => {
+        if (remaining[key] === recoveringReceipts[key]) delete remaining[key];
+      });
+      saveReceipts(remaining);
+    } catch (error) { if (appMounted.current) setRecoveryError(error instanceof Error ? error.message : String(error)); }
+    finally { if (appMounted.current) setRecoveringAccepted(false); }
+  };
   const [busyIssueIds, setBusyIssueIds] = useState([]);
   const [drafts, setDrafts] = useState({ active: {}, archives: {}, nextArchiveId: 1 });
   const [openId, setOpenId] = useState(null);
@@ -2012,7 +2070,10 @@ export default function App({
     });
   };
 
+  const clearSubmittedProgress = (id, text) => setDrafts((currentDrafts) => currentDrafts.active[id]?.progress?.trim() === text
+    ? { ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, "progress", "") } : currentDrafts);
   const addProgress = (id, entry) => runIssueOperation(id, async () => {
+    if (acceptedRef.current[`progress:${id}`]) throw new Error("This issue has an accepted update awaiting recovery. Reload saved data before posting another update.");
     const current = latestIssues.current?.find((issue) => issue.id === id);
     if (!current) throw new Error("Issue is no longer available. Reload the register.");
     if (!current.eTag) throw new Error("Reload this issue before posting progress so its current state can be checked.");
@@ -2021,14 +2082,16 @@ export default function App({
     setSaveError("");
     try {
       const saved = await dataService.addProgressLogEntry(id, signedEntry);
-      setDrafts((currentDrafts) => currentDrafts.active[id]?.progress?.trim() === entry.text
-        ? { ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, "progress", "") } : currentDrafts);
+      clearSubmittedProgress(id, entry.text);
       setIssues((items) => items.map((item) => item.id === id
         ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
       if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
       return saved;
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      if (error instanceof AcceptedWriteError) {
+        clearSubmittedProgress(id, entry.text);
+        quarantine(`progress:${id}`, error, entry.text);
+      } else setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
     }
   });
@@ -2053,7 +2116,11 @@ export default function App({
   };
 
   const addIntake = async (form) => {
+    if (acceptedRef.current.create) throw new Error("An accepted report is awaiting recovery. Reload saved data before submitting another report.");
+    if (createPending.current) throw new Error("A report is already being submitted. Wait for it to finish.");
+    createPending.current = true;
     setSaveError("");
+    try {
     const created = await dataService.createIssue({
       ...form,
       reportDate: iso(today()),
@@ -2085,6 +2152,10 @@ export default function App({
     setIssues((currentIssues) => [...currentIssues, created]);
     if (created.saveWarning) setSaveWarning({ message: created.saveWarning, issueId: created.id });
     return created.qsNumber;
+    } catch (error) {
+      if (error instanceof AcceptedWriteError) quarantine("create", error, form.shortSummary);
+      throw error;
+    } finally { createPending.current = false; }
   };
 
   const saveSettings = async (next) => {
@@ -2157,6 +2228,7 @@ export default function App({
       });
     } catch (error) {
       setSaveError("");
+      if (error instanceof AcceptedWriteError) return;
       setSaveWarning({ message: "Issue was re-opened, but its journal note could not be saved. Add the note from the progress log.", issueId: id });
     }
   };
@@ -2171,20 +2243,20 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (profile === "owner") {
       body = !readOnlyCurrent
-        ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
+        ? <OwnerIssueDetail acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
         : <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (isClosed) {
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />
+        ? <QMIssueDetail acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />
         : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;
   else if (activeTab === "register") body = <Register issues={issues} onOpen={setOpenId} filter={regFilter} setFilter={setRegFilter} />;
   else if (activeTab === "reminders") body = <RemindersView issues={issues} />;
-  else if (activeTab === "report") body = <ReporterForm onSubmit={addIntake} settings={settings} reporterName={userDisplayName} />;
+  else if (activeTab === "report") body = <ReporterForm acceptedReceipt={acceptedReceipts.create} onSubmit={addIntake} settings={settings} reporterName={userDisplayName} />;
   else if (activeTab === "mytasks") body = <OwnerTasks issues={issues} owner={owner} ownerEmailAddress={userEmail} onOpen={setOpenId} />;
   else if (activeTab === "settings") body = <SettingsView connection={connection} settings={settings} onSave={saveSettings} onRunDiagnostics={onRunDiagnostics} />;
 
@@ -2235,8 +2307,13 @@ export default function App({
         </header>
 
         <main className="mx-auto max-w-7xl px-4 py-5">
-          {loadError && <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">Could not load SharePoint data: {loadError} <button className="ml-2 underline" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></div>}
-          {saveError && <div role="alert" className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">A SharePoint change failed and was not saved: {saveError}</div>}
+          {loadError && <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">Could not load Q-Star data: {loadError} <button className="ml-2 underline" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></div>}
+          {saveError && <div role="alert" className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">A Q-Star change failed and was not saved: {saveError}</div>}
+          {Object.keys(acceptedReceipts).length > 0 && <div role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+            A submission was saved, but its receipt could not be read. Do not submit that content again. Review the refreshed register or progress log before starting a fresh submission.
+            <button disabled={recoveringAccepted} className="ml-2 underline" onClick={recoverAcceptedWrites}>{recoveringAccepted ? "Reloading saved data…" : "Reload saved data"}</button>
+            {recoveryError && <p role="alert">Reload is still unavailable: {recoveryError}</p>}
+          </div>}
           {saveWarning && <div role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
             Saved with a warning: {saveWarning.message}
             {(!current || current.id !== saveWarning.issueId || current.eTag || current.status === "Closed") && <button disabled={reloadingSaved} className="ml-2 underline" onClick={reloadSavedIssue}>{reloadingSaved ? "Reloading…" : "Reload saved issue"}</button>}

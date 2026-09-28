@@ -1,10 +1,10 @@
 # Review repair handoff
 
-These repairs target the `beta` branch after merging `main` (merge commit `04931bb`). The historical files under `frontend/prototype/` remain reference material. The application runs from `frontend/src/`.
+These repairs target the `beta` branch after the initial `main` merge (`04931bb`) and the integration of upstream `70ebc76`. The historical files under `frontend/prototype/` remain reference material. The application runs from `frontend/src/`.
 
 ## Changes
 
-- Provisioning entry points surface errors and reconcile existing fields, indexes, current Region choices, and reference configuration. Germany maps to Western Europe (Amsterdam) only during an explicit Region migration.
+- Provisioning entry points surface errors and reconcile existing fields, indexes, current Region choices, and reference configuration. Germany maps to Western Europe (Amsterdam), and Asia Pacific maps to Asia Pacific (Bangkok), only during an explicit Region migration. France (Paris) is available as a new choice.
 - See [saving and recovering drafts](../README.md#saving-and-recovering-drafts) for the repaired conflict, busy-state, accepted-write, and recovery behavior.
 - SharePoint IDs allocate new QS references through an immutable `ReferenceOffset`. Existing QS references are preserved. Both intake paths use this rule.
 - See [working with issues](../README.md#working-with-issues) for the repaired lifecycle actions.
@@ -12,6 +12,7 @@ These repairs target the `beta` branch after merging `main` (merge commit `04931
 - Calendar dates retain their day across time zones and DST. Today's reports count in YTD metrics; ISO date envelopes work in date fields and reminder comparisons.
 - Automation guidance covers on-hold reminders, accepted owner updates, null dates, and deduplication across dates, recipients, and reopened cycles.
 - Settings shows the active web-part connection. Local demo seeds persist through the mock service, and target changes refresh service state and role resolution.
+- The optional Java backend uses delegated SharePoint access, strict token and role checks, current-owner restrictions, original ETags, native Person fields and journal folders, stable references, and the same lifecycle rules. Its service guide owns configuration and activation requirements. Direct SharePoint remains the default, and backend activation is blocked pending the required permission verification.
 
 ## Deployment order
 
@@ -20,11 +21,18 @@ These repairs target the `beta` branch after merging `main` (merge commit `04931
 3. Update Forms intake, permission reconciliation, reminder rules, and accepted-progress notifications using the [flow guide](../backend/power-automate/qstar-power-automate-flows.md). Use the same site/list targets as the web part.
 4. Build and deploy the new package to the test site. Set the connection and access mode in the web-part properties, then run diagnostics as an Admin.
 5. Complete the tenant checks below before resuming automation or production intake. Beta site Members retain the pilot's broad edit rights; production folder ACL enforcement requires the production provisioner and assignment flow.
+6. For a later backend rollout, follow the [service guide](../backend/service/README.md) and [backend acceptance cases](../backend/sharepoint/connection-test-plan.md#optional-backend-acceptance). Keep it disabled until the narrow permission boundary, delegated audit identity, API roles, and real SPFx integration are verified. Do not use broader consent or app-only access as an implicit workaround.
 
 ## Tenant acceptance checks
 
 Use the [tenant verification plan](../backend/sharepoint/connection-test-plan.md), including its editing/lifecycle/recovery scenarios. That plan owns the acceptance cases; local interaction and service-contract tests do not establish tenant results.
 
 ## Evidence and limits
+
+The local integration of upstream `70ebc76` passed 163 frontend tests, 43 Java tests,
+and ten provisioning tests. SPFx lint/type/Sass/webpack checks, a clean production
+bundle/package, OpenAPI generation, Java 21 compilation, Spotless, and the executable
+JAR build also passed. The Java HTTP tests use signed synthetic tokens and mocked
+SharePoint/OBO endpoints; they do not establish tenant consent or access behavior.
 
 Local checks execute domain rules, React interactions, mocked SharePoint service contracts, and stateful provisioning command doubles, plus the SPFx lint/type/build/package tools. They do not authenticate against Microsoft 365. Power Automate flows are deployment instructions in this repository, not installed flow exports. Tenant ACL behavior, native PowerShell execution, flow delivery/retries, and real SharePoint round trips require the acceptance checks above.

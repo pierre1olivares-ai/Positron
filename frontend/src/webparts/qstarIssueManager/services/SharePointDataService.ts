@@ -22,6 +22,7 @@ import {
 } from "./fieldMap";
 import { readPersonValue } from "./sharePointValues";
 import { normalizeDateOnly } from "../domain/calendarDates";
+import { normalizeRegion } from "../domain/referenceData";
 import { IssueConflictError, IssueRefreshError } from "./issueErrors";
 
 type SPItem = Record<string, unknown> & { Id: number };
@@ -293,7 +294,7 @@ export class SharePointDataService implements IDataService {
       createdByEmail: createdBy.email,
       reportDate: normalizeDateOnly(item[f.reportDate] as string),
       departmentBU: (item[f.departmentBU] as string) || "",
-      region: (item[f.region] as string) || "",
+      region: normalizeRegion((item[f.region] as string) || ""),
       alreadyInContact: (item[f.alreadyInContact] as IIssue["alreadyInContact"]) || "No",
       deviationType: (item[f.deviationType] as string) || "",
       issueOrigin: (item[f.issueOrigin] as string) || "",

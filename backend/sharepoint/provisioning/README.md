@@ -20,8 +20,8 @@ profiles. Beta preserves existing permissions; it does not undo production ACLs.
 ## Region migration
 
 The mapping in `region-schema.json` follows the main-branch taxonomy: Germany is
-part of Western Europe (Amsterdam); the other old region names map to their named
-offices. Existing custom values are retained, never guessed or deleted.
+part of Western Europe (Amsterdam), Asia Pacific maps to Asia Pacific (Bangkok),
+and France (Paris) is a new choice. Other old region names map to their named offices. Existing custom values are retained, never guessed or deleted.
 
 Default provisioning (`Preserve`) adds the canonical choices while retaining
 legacy choices and existing record values. Preview an existing site's row changes

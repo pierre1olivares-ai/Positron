@@ -17,6 +17,7 @@ Closed issues are read-only. Admins and Quality Managers can choose **Re-open is
 - While a save, progress post, or reload is pending for an issue, its detail and progress controls are disabled, including after returning to the register and opening it again. Other issues remain editable. A close request cannot queue behind pending work: wait for it to finish, then initiate closing again.
 - A rejected save or post keeps the open form's draft. A version conflict blocks another detail save until you reload. Copy any detail text you need before choosing **Reload latest and discard draft**; triage instead offers **Reload latest and return to queue**. Ordinary navigation is not an autosave.
 - **Saved with a warning** means the write was accepted but a follow-up operation failed. Use the issue reload action instead of repeating the submission. An accepted closure stays read-only even if its refresh fails. If reopening is disabled because the saved version is unavailable, use **Reload this issue** in its read-only detail; it works independently of warnings for other issues and can be retried after a failure.
+- In backend mode, a successful response can occasionally be unreadable even though the submission was saved. The submitted form or note is consumed, and that operation stays blocked until **Reload saved data** succeeds. Review the refreshed register or journal before starting a fresh submission. This guard survives navigation and, when browser session storage is available, reloads in the same tab; it does not automatically repeat the submission.
 - If refreshed closure or reassignment makes an editor read-only, unsubmitted detail fields, hold fields, and progress text appear in **Unsaved draft recovery**. Unposted text is also retained when your own accepted close replaces the editor. These selectable copies remain separate from fresh edits, even after reopening, reassignment back, or later saves/posts. Repeated transitions can retain multiple copies. **Discard recovered draft** removes only that copy, without changing live edits or saved data.
 
 Recovery copies are held only in the current app session. Copy anything you need before refreshing or closing the page or changing the web-part connection. Recovery never automatically restores or submits old content.
@@ -24,15 +25,18 @@ Recovery copies are held only in the current app session. Copy anything you need
 ## Repo structure
 
 ```
-frontend/   SPFx web part (React) — UI layer. See frontend/README.md.
-backend/    SharePoint List + Power Automate — data/automation layer. See backend/README.md.
-docs/       Cross-cutting project docs (rollout/implementation checklist).
+frontend/         SPFx web part (React) — UI layer. See frontend/README.md.
+backend/service/  Java/Spring Boot backend — thin authenticated gateway. See backend/service/README.md.
+backend/          SharePoint List + Power Automate — the actual data/automation layer. See backend/README.md.
+docs/             Cross-cutting project docs (rollout/implementation checklist).
 ```
 
 - **`frontend/`** — the implemented SPFx web part. `frontend/prototype/` holds the original validated React prototype and its clickable demo, kept as a historical UI reference; the running implementation is under `frontend/src/`.
-- **`backend/`** — no custom server; the SharePoint List is the data store, Power Automate handles intake/reminders. See `backend/sharepoint/` and `backend/power-automate/`.
+- **`backend/`** — SharePoint is the data store and Power Automate handles intake/reminders. `backend/service/` adds an optional Java 21 gateway using the caller's delegated SharePoint identity. Direct SharePoint mode remains the default; backend activation requires the acceptance checks in its [service guide](backend/service/README.md).
 - **`docs/`** — the non-developer rollout plan and IT ask list (`qstar-implementation-checklist.md`).
 
 ## Local development
 
 Follow [frontend/README.md](frontend/README.md) for the supported Node version, installation, local development, checks, and packaging. For upgrade order, see [the repair handoff](docs/qstar-review-repairs.md). Before testing against your company's tenant, use the [provisioning guide](backend/sharepoint/provisioning/README.md) and [tenant verification plan](backend/sharepoint/connection-test-plan.md).
+
+The optional backend uses Java 21 and its checked-in Gradle wrapper. See [backend/service/README.md](backend/service/README.md) for builds, local tests, identity configuration, and the permission checks required before activation. It is disabled by default.

@@ -22,6 +22,9 @@ export default class QstarIssueManager extends React.Component<IQstarIssueManage
     this._mounted = true;
     this.props.roleResolver.resolve()
       .then((roleResolution) => {
+        if (roleResolution.source === "backend" && (!roleResolution.user || !roleResolution.connection)) {
+          throw new Error("The backend did not return a verified user and connection. Access is disabled.");
+        }
         if (this._mounted) this.setState({ roleResolution, roleError: undefined });
       })
       .catch((error: Error) => {
@@ -40,7 +43,7 @@ export default class QstarIssueManager extends React.Component<IQstarIssueManage
       return (
         <section className={styles.accessError} role="alert">
           <h2>Q-Star access could not be verified</h2>
-          <p>Privileged features are disabled because your SharePoint role could not be resolved.</p>
+          <p>Access is disabled because your Q-Star role could not be resolved.</p>
           <p className={styles.errorDetail}>{roleError}</p>
         </section>
       );
@@ -55,9 +58,9 @@ export default class QstarIssueManager extends React.Component<IQstarIssueManage
         <QstarPrototype
           dataService={this.props.dataService}
           profile={roleResolution.role}
-          userDisplayName={this.props.userDisplayName}
-          userEmail={this.props.userEmail}
-          connection={this.props.connection}
+          userDisplayName={roleResolution.user?.displayName || this.props.userDisplayName}
+          userEmail={roleResolution.user?.email || this.props.userEmail}
+          connection={roleResolution.connection || this.props.connection}
           developmentMode={roleResolution.source === "development"}
           onRunDiagnostics={this.props.runConnectionDiagnostics}
         />

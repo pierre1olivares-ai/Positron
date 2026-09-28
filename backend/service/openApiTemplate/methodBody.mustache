@@ -1,0 +1,5 @@
+{{^reactive}}
+    return {{#jdk8}}{{#async}}CompletableFuture.completedFuture({{/async}}{{/jdk8}}new ResponseEntity<>({{#returnSuccessCode}}HttpStatus.OK{{/returnSuccessCode}}{{^returnSuccessCode}}HttpStatus.NOT_IMPLEMENTED{{/returnSuccessCode}}){{#jdk8}}{{#async}}){{/async}}{{/jdk8}};{{/reactive}}{{#reactive}}
+Mono<Void> result = Mono.empty();
+exchange.getResponse().setStatusCode({{#returnSuccessCode}}HttpStatus.OK{{/returnSuccessCode}}{{^returnSuccessCode}}HttpStatus.NOT_IMPLEMENTED{{/returnSuccessCode}});
+return result.then(Mono.empty());{{/reactive}}

@@ -29,7 +29,7 @@ const statusOptionsFor = (i) => i && isNC(i) ? ["Created", "In Progress", NC_TES
 const TRANSFORM_TYPES = ["OFI", "NC Minor", "NC Major", "Only sent to Dept/BU for Action"];
 const DEVIATION_TYPES = ["Communication", "Compliance", "Documentation", "Equipment", "Process", "Quality", "Safety", "System"];
 const ORIGINS = ["Customer Complaints or Claims", "Internal Finding"];
-const REGIONS = ["Americas (Miami)", "Asia Pacific", "China (Shanghai)", "Eastern Europe (Vienna)", "Head Office (Neu-Isenburg)", "Western Europe (Amsterdam)"];
+const REGIONS = ["Americas (Miami)", "Asia Pacific (Bangkok)", "China (Shanghai)", "Eastern Europe (Vienna)", "France (Paris)", "Head Office (Neu-Isenburg)", "Western Europe (Amsterdam)"];
 const YESNO = ["Yes", "No"];
 const BUSINESS_UNITS = [
   "BU Aftermarket", "BU Airlines", "BU Automotive", "BU Diplo & High Security",

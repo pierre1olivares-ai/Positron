@@ -4,6 +4,12 @@
 
 This guide is written for a **non‑developer leading the project**. Your job is to *coordinate and decide*; IT will *execute* the technical parts. Tick the boxes as you go, and use the "Who to ask in IT" section to send the right request to the right team.
 
+This checklist covers the default direct SharePoint deployment. The optional Java gateway
+is disabled by default and has an additional [permission and activation boundary](../backend/service/README.md#permission-and-activation-boundary).
+Keep that mode disabled until IT verifies a narrow delegated SharePoint REST grant and
+completes the [backend acceptance cases](../backend/sharepoint/connection-test-plan.md#optional-backend-acceptance).
+Do not substitute broad tenant consent or application-only access to bypass this prerequisite.
+
 ---
 
 ## 0. The big picture — what we're building and where it lives

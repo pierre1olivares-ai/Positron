@@ -50,7 +50,7 @@ test('region preview performs no writes and apply preserves references, content,
   succeeds(f.run());
   const state = f.read();
   const items = Object.keys(schema.aliases).map((region, index) => ({Id: index + 1, Region: region, QsNumber: 2000 + index, Description: `Keep ${index}`, Modified: '2026-01-01'}));
-  items.push({Id: 7, Region: 'Historic custom region', QsNumber: 3000, Description: 'Keep custom'});
+  items.push({Id: items.length + 1, Region: 'Historic custom region', QsNumber: 3000, Description: 'Keep custom'});
   state.lists['Q-Star Issues'].items = items;
   state.lists['Q-Star Config'].items = [{Id: 2, SettingsJson: '{"msFormUrl":"preserve"}'}];
   f.write(state);

@@ -16,7 +16,7 @@ Run the Admin connection test. Confirm site/user access, required columns and ty
 
 - Create issues concurrently from two browsers and Forms. Every new QsNumber equals ReferenceOffset + that item's ID, with no collision with legacy references.
 - Interrupt the second number-materialization action. Resume the same created item; no duplicate intake should appear. A Forms replay uses its response-ID log.
-- Compare migrated records with the backup: Region aliases map correctly (Germany → Western Europe (Amsterdam)); descriptions, attachments, old QsNumber, progress item IDs, Author and Created remain intact. Repeating provisioning keeps the same offset and journal mapping.
+- Compare migrated records with the backup: Region aliases map correctly (Germany → Western Europe (Amsterdam), Asia Pacific → Asia Pacific (Bangkok)); France (Paris) is available for new reports. Descriptions, attachments, old QsNumber, progress item IDs, Author and Created remain intact. Repeating provisioning keeps the same offset and journal mapping.
 
 ## Editing, lifecycle, and recovery
 
@@ -37,6 +37,22 @@ Verify the [user-facing save and recovery contract](../../README.md#saving-and-r
 - As a QM, append to either issue but verify editing/deleting old journal entries is denied. Admin maintenance access remains intentional.
 - Reassign A → B, then B → empty. Confirm each former owner's issue Edit and folder Append are removed after Flow C finishes, while group read and QM/Admin access remain. Repeat reconciliation and rapidly queue changes; final ACLs reflect the latest assignment.
 - Confirm a successful comment creates one durable journal item even if a later reload fails. Refresh before manually retrying an ambiguous request. Beta cannot validate production isolation because it retains site permissions.
+
+## Optional backend acceptance
+
+Backend mode remains disabled until IT confirms the narrow delegated permission boundary described in the [service guide](../service/README.md). Local mocks do not establish that SharePoint REST supports the selected permission in this tenant. Do not broaden consent to make a failing test pass.
+
+After that prerequisite is satisfied, use a test deployment and the same accounts and records for both access paths:
+
+- Reject missing, expired, wrong-tenant, wrong-issuer, wrong-audience, app-only, and missing-scope tokens. Unknown app roles must have no write capability. Verify explicit Admin/QM/Owner/Reader assignments and that `/me` returns the delegated SharePoint user and the actual configured site/lists.
+- Request another site and verify the issued downstream token cannot access it. Confirm the service never accepts a caller-supplied site or switches to an application token. SharePoint audit `Author` and `Created` must identify the real caller and server timestamp.
+- Exercise owner writes on the currently assigned issue and on another owner's issue. Forbid reassignment, QM-only fields, closing, reopening, and under-test detail changes by an owner. Tamper with native IDs, author, parent, timestamps, and server-managed reference fields; none may override the server's values.
+- Open the same issue through the direct and backend paths. A stale backend PATCH must return 412 using its original ETag, and neither path may overwrite the other. Test explicit null clears, email-only person changes, legacy references, concurrent intake, and the complete NC/OFI lifecycle.
+- Append as QM and current owner into the correct existing folder. Confirm native audit identity, append-only rights, folder-based grouping, and no journal entries created at the root. Verify reassignment removes old access after Flow C completes.
+- Fail readback after accepted create, PATCH, and append. Confirm warning receipts retain the created identity when available, no operation is automatically repeated, and a successful reload restores a usable version. Exercise an unreadable accepted response across navigation and reload; submitted content must not be offered for duplicate submission.
+- Load the real SPFx page through its SharePoint origin. Verify CORS preflight and readable ETag/receipt headers, authenticated diagnostics, errors on denied settings reads, and no fallback to direct SharePoint after backend failure. Changing the backend target must reload `/me` and the app's connection state.
+
+Record the service build, token permission grant, role assignments, permission-boundary evidence, and the deployed web-part package with the results. The backend's stronger field checks apply to API requests; direct SharePoint Edit rights remain as described above.
 
 ## Notifications and dates
 
