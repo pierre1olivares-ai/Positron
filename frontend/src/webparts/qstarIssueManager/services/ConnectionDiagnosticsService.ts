@@ -196,7 +196,6 @@ export class ConnectionDiagnosticsService {
     let issueId: number | undefined;
     let progressId: number | undefined;
     try {
-      const currentUser = await this.sp.web.currentUser.select("Id")();
       const issues = this.sp.web.lists.getByTitle(this.issuesListName).items;
       const created = await issues.add(buildDiagnosticIssuePayload());
       issueId = created.Id as number;
@@ -205,7 +204,7 @@ export class ConnectionDiagnosticsService {
       await issues.getById(currentIssueId).update({ [ISSUE_FIELDS.followUp]: "diagnostic update" });
 
       const progress = this.sp.web.lists.getByTitle(this.progressListName).items;
-      const createdEntry = await progress.add(buildDiagnosticProgressPayload(currentIssueId, currentUser.Id));
+      const createdEntry = await progress.add(buildDiagnosticProgressPayload(currentIssueId));
       progressId = createdEntry.Id as number;
       await progress.getById(progressId).delete();
       progressId = undefined;

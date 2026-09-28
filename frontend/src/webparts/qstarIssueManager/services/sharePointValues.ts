@@ -2,7 +2,7 @@ export type SPUserValue = {
   Id?: number;
   Title?: string;
   EMail?: string;
-  LoginName?: string;
+  Name?: string;
 };
 
 export interface IPersonValue {
@@ -17,6 +17,6 @@ export function readPersonValue(raw: SPUserValue | string | undefined): IPersonV
   return {
     id: raw.Id,
     displayName: raw.Title || "",
-    email: raw.EMail || raw.LoginName || "",
+    email: raw.EMail || (raw.Name || "").split("|").pop() || "",
   };
 }

@@ -59,14 +59,14 @@ test("production field maps require native Person fields, not companion email co
   assert.equal(ISSUE_SELECT_FIELD_NAMES.includes("TaskOwner/EMail"), true);
 });
 
-test("diagnostic payload satisfies required issue fields and uses a Person lookup ID", () => {
+test("diagnostic payload satisfies required issue fields and leaves authorship to SharePoint", () => {
   const issue = buildDiagnosticIssuePayload();
   for (const required of ["Title", "ShortSummary", "Description", "QsNumber", "Severity", "DepartmentBU", "Region", "Triaged", "TaskCreated"]) {
     assert.notEqual(issue[required], undefined, `${required} should be populated`);
   }
 
-  const progress = buildDiagnosticProgressPayload(12, 34);
+  const progress = buildDiagnosticProgressPayload(12);
   assert.equal(progress.ParentItemId, 12);
-  assert.equal(progress.AuthorId, 34);
+  assert.equal(progress.AuthorId, undefined);
   assert.equal(typeof progress.EntryText, "string");
 });

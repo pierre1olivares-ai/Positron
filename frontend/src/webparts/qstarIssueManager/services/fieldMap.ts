@@ -44,6 +44,7 @@ export const ISSUE_FIELDS = {
   ownerUpdate: "OwnerUpdate",
   ownerUpdateAt: "OwnerUpdateAt",
   ownerUpdateText: "OwnerUpdateText",
+  reminderCycle: "ReminderCycle",
 } as const;
 
 export const PROGRESS_FIELDS = {
@@ -79,7 +80,7 @@ export const ISSUE_SELECT_FIELD_NAMES = ISSUE_SCALAR_FIELD_NAMES.concat(
     `${name}/Id`,
     `${name}/Title`,
     `${name}/EMail`,
-    `${name}/LoginName`
+    `${name}/Name`
   ), [])
 );
 
@@ -88,8 +89,9 @@ export const PROGRESS_SCALAR_FIELD_NAMES = PROGRESS_FIELD_NAMES.filter(
 );
 
 export const PROGRESS_SELECT_FIELD_NAMES = PROGRESS_SCALAR_FIELD_NAMES.concat(
+  "FileDirRef", "FSObjType", "Created",
   `${PROGRESS_FIELDS.author}/Id`,
   `${PROGRESS_FIELDS.author}/Title`,
   `${PROGRESS_FIELDS.author}/EMail`,
-  `${PROGRESS_FIELDS.author}/LoginName`
+  `${PROGRESS_FIELDS.author}/Name`
 );

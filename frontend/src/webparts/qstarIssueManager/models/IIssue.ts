@@ -21,16 +21,22 @@ export type TransformedInto =
 export type YesNo = "Yes" | "No";
 
 export interface IProgressLogEntry {
+  id?: number;
   ts: string;
   author: string;
   authorId?: number;
   authorEmail?: string;
   text: string;
+  saveWarning?: string;
 }
 
 export interface IIssue {
   qsNumber: number;
   id: number;
+  /** SharePoint version used for an optimistic-concurrency update. */
+  eTag?: string;
+  /** The record was created successfully, but a follow-up read/write needs retrying. */
+  saveWarning?: string;
   triaged: boolean;
   status: IssueStatus | undefined;
   taskCreated: YesNo;
@@ -75,6 +81,7 @@ export interface IIssue {
   ownerUpdate: boolean;
   ownerUpdateAt: string;
   ownerUpdateText: string;
+  reminderCycle: string;
 
   attachments: unknown[];
   progressLog: IProgressLogEntry[];
