@@ -58,7 +58,10 @@ const iso = (d) => d instanceof Date ? formatLocalDate(d) : normalizeDateOnly(d)
 const addDays = addCalendarDays;
 const addMonths = addCalendarMonths;
 const daysBetween = calendarDaysBetween;
-const fmtDate = (d) => d ? new Date(`${normalizeDateOnly(d)}T12:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+const fmtDate = (d) => {
+  const date = iso(d);
+  return date ? new Date(`${date}T12:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+};
 const fmtDateTime = (d) => new Date(d).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
 /* ---------- Derived state helpers ---------- */
@@ -443,9 +446,9 @@ function Field({ label, children, hint }) {
 const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800 outline-none tm-input";
 function TextInput(p) { return <input {...p} className={inputCls} />; }
 function TextArea(p) { return <textarea {...p} className={`${inputCls} min-h-20 resize-y`} />; }
-function Select({ value, onChange, options, placeholder }) {
+function Select({ value, onChange, options, placeholder, disabled }) {
   return (
-    <select value={value || ""} onChange={onChange} className={inputCls}>
+    <select value={value || ""} onChange={onChange} disabled={disabled} className={inputCls}>
       <option value="">{placeholder || "Select…"}</option>
       {options.map((o) => <option key={o} value={o}>{o}</option>)}
     </select>
@@ -537,12 +540,14 @@ export function Dashboard({ issues: allIssues }) {
   const created = issues.filter((i) => i.triaged && i.status !== "Rejected");
   // Current-year scope for the dashboard graphs (the Cumulative chart deliberately spans all years)
   const nowD = today();
+  const asOf = iso(nowD);
+  const datedCreated = created.filter((i) => iso(i.reportDate) && iso(i.reportDate) <= asOf);
   const curYear = nowD.getFullYear();
   const yearStart = new Date(curYear, 0, 1);
   const inYear = (d) => isDateInYearThroughToday(d, nowD);
   const createdY = created.filter((i) => inYear(i.reportDate));
   const ytdRange = `Data calculated from ${fmtDate(yearStart)} to ${fmtDate(nowD)}.`;
-  const cumFrom = created.length ? new Date(Math.min(...created.map((i) => +new Date(i.reportDate)))) : nowD;
+  const cumFrom = datedCreated.length ? datedCreated.map((i) => iso(i.reportDate)).sort()[0] : nowD;
   const cumRange = `Data calculated from ${fmtDate(cumFrom)} to ${fmtDate(nowD)}.`;
   const open = issues.filter(isOpen);
   const closed = issues.filter((i) => i.status === "Closed");
@@ -576,14 +581,16 @@ export function Dashboard({ issues: allIssues }) {
   const ncRate = ncs.length ? Math.round((ncVerified.length / ncs.length) * 100) : 0;
 
   // Monthly trend — current year (Jan → current month)
-  const monthKey = (d) => new Date(d).toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
   const months = [];
-  for (let mo = 0; mo <= nowD.getMonth(); mo++) { const d = new Date(curYear, mo, 1); months.push({ key: monthKey(d), m: mo, y: curYear, end: new Date(curYear, mo + 1, 0) }); }
-  const trend = months.map(({ key, m, y, end }) => {
-    const c = created.filter((i) => { const d = new Date(i.reportDate); return d.getMonth() === m && d.getFullYear() === y; }).length;
-    const cl = closed.filter((i) => i.closedDate && new Date(i.closedDate).getMonth() === m && new Date(i.closedDate).getFullYear() === y).length;
+  for (let mo = 0; mo <= nowD.getMonth(); mo++) {
+    const d = new Date(curYear, mo, 1);
+    months.push({ key: d.toLocaleDateString("en-GB", { month: "short", year: "2-digit" }), month: iso(d).slice(0, 7), end: mo === nowD.getMonth() ? asOf : iso(new Date(curYear, mo + 1, 0)) });
+  }
+  const trend = months.map(({ key, month, end }) => {
+    const c = datedCreated.filter((i) => iso(i.reportDate).slice(0, 7) === month).length;
+    const cl = closed.filter((i) => iso(i.closedDate).slice(0, 7) === month && iso(i.closedDate) <= end).length;
     // Open backlog at month-end: created on/before end, and not yet closed by end (all-time, so the backlog is accurate)
-    const backlog = created.filter((i) => new Date(i.reportDate) <= end && (i.status !== "Closed" || (i.closedDate && new Date(i.closedDate) > end))).length;
+    const backlog = datedCreated.filter((i) => iso(i.reportDate) <= end && (i.status !== "Closed" || (iso(i.closedDate) && iso(i.closedDate) > end))).length;
     return { name: key, Created: c, Closed: cl, Backlog: backlog, Net: c - cl };
   });
   const backlogChange = trend.length ? trend[trend.length - 1].Backlog - trend[0].Backlog : 0;
@@ -598,16 +605,19 @@ export function Dashboard({ issues: allIssues }) {
   const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const catColorAll = { NC: CHART.purple, OFI: CHART.sky, Other: CHART.slate };
   const cumSeries = cumCat === "All" ? ["NC", "OFI", "Other"] : [cumCat];
-  const byStatusSet = cumStatus === "Open" ? created.filter(isOpen) : cumStatus === "Closed" ? created.filter((i) => i.status === "Closed") : created;
+  const byStatusSet = cumStatus === "Open" ? datedCreated.filter(isOpen) : cumStatus === "Closed" ? datedCreated.filter((i) => i.status === "Closed") : datedCreated;
   const cumFiltered = cumCat === "All" ? byStatusSet : byStatusSet.filter((i) => categoryOf(i) === cumCat);
   const gran = cumGran;
-  const idxOf = (d) => gran === "Year" ? d.getFullYear() : gran === "Quarter" ? d.getFullYear() * 4 + Math.floor(d.getMonth() / 3) : d.getFullYear() * 12 + d.getMonth();
+  const idxOf = (d) => {
+    const [year, month] = iso(d).split("-").map(Number);
+    return gran === "Year" ? year : gran === "Quarter" ? year * 4 + Math.floor((month - 1) / 3) : year * 12 + month - 1;
+  };
   const yearOfIdx = (ix) => gran === "Year" ? ix : gran === "Quarter" ? Math.floor(ix / 4) : Math.floor(ix / 12);
   const labelOf = (ix) => gran === "Year" ? String(ix) : gran === "Quarter" ? `Q${(ix % 4) + 1} '${String(Math.floor(ix / 4)).slice(2)}` : `${MONTH_ABBR[ix % 12]} '${String(Math.floor(ix / 12)).slice(2)}`;
-  const nowIdx = idxOf(new Date());
-  const startIdx = created.length ? Math.min(...created.map((i) => idxOf(new Date(i.reportDate)))) : nowIdx;
+  const nowIdx = idxOf(nowD);
+  const startIdx = datedCreated.length ? Math.min(...datedCreated.map((i) => idxOf(i.reportDate))) : nowIdx;
   const adds = {};
-  cumFiltered.forEach((i) => { const ix = idxOf(new Date(i.reportDate)); const c = categoryOf(i); adds[ix] = adds[ix] || {}; adds[ix][c] = (adds[ix][c] || 0) + 1; });
+  cumFiltered.forEach((i) => { const ix = idxOf(i.reportDate); const c = categoryOf(i); adds[ix] = adds[ix] || {}; adds[ix][c] = (adds[ix][c] || 0) + 1; });
   const running = {}; cumSeries.forEach((c) => (running[c] = 0));
   let prevYear = null;
   const cumData = [];
@@ -621,9 +631,9 @@ export function Dashboard({ issues: allIssues }) {
     cumData.push(row);
   }
   // ---- Per-year totals + YoY trend (drives the arrow strip) ----
-  const minYear = created.length ? Math.min(...created.map((i) => new Date(i.reportDate).getFullYear())) : new Date().getFullYear();
-  const maxYear = new Date().getFullYear();
-  const yearTotalOf = (y) => cumFiltered.filter((i) => new Date(i.reportDate).getFullYear() === y).length;
+  const minYear = datedCreated.length ? Math.min(...datedCreated.map((i) => Number(iso(i.reportDate).slice(0, 4)))) : curYear;
+  const maxYear = curYear;
+  const yearTotalOf = (y) => cumFiltered.filter((i) => Number(iso(i.reportDate).slice(0, 4)) === y).length;
   const yearTrend = [];
   for (let y = minYear; y <= maxYear; y++) {
     const total = yearTotalOf(y);
@@ -954,7 +964,7 @@ export function ProgressLog({ entries, canAdd, author, onAdd }) {
       <SectionTitle icon={ListChecks} right={<span className="inline-flex items-center gap-1 text-xs text-slate-400"><Lock size={12} />Timestamped · cannot be edited or deleted</span>}>Progress log</SectionTitle>
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <TextArea value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
+          <TextArea disabled={saving} value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
             <Btn disabled={!text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
@@ -1033,25 +1043,35 @@ function HoldBanner({ i }) {
   );
 }
 
-function HoldDialog({ open, initialReason, initialUntil, onCancel, onConfirm }) {
+function HoldDialog({ open, initialReason, initialUntil, onCancel, onConfirm, saving, needsReload }) {
   const [reason, setReason] = useState("");
   const [until, setUntil] = useState("");
   useEffect(() => { if (open) { setReason(initialReason || ""); setUntil(initialUntil || ""); } }, [open]);
   if (!open) return null;
   const valid = reason.trim() && until;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={saving ? undefined : onCancel}>
       <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center gap-2"><Clock size={18} className="text-amber-500" /><h3 className="text-base font-bold text-slate-900">Put issue on hold</h3></div>
         <p className="mb-3 text-sm text-slate-500">Both fields are required. The owner and Quality Team will be reminded a week before the resume date and again on the day.</p>
-        <Field label="Reason for hold *"><TextArea value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this issue being paused?" /></Field>
-        <div className="mt-3"><Field label="Resume work on *" hint="When work on the mitigation will continue"><TextInput type="date" value={until} min={iso(today())} onChange={(e) => setUntil(e.target.value)} /></Field></div>
+        <Field label="Reason for hold *"><TextArea disabled={saving} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this issue being paused?" /></Field>
+        <div className="mt-3"><Field label="Resume work on *" hint="When work on the mitigation will continue"><TextInput disabled={saving} type="date" value={until} min={iso(today())} onChange={(e) => setUntil(e.target.value)} /></Field></div>
         <div className="mt-4 flex justify-end gap-2">
-          <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
-          <Btn variant="primary" onClick={() => onConfirm(reason.trim(), until)} disabled={!valid} style={valid ? { background: "#d97706" } : undefined}><Clock size={15} />Put on hold</Btn>
+          <Btn variant="ghost" disabled={saving} onClick={onCancel}>Cancel</Btn>
+          <Btn variant="primary" onClick={() => onConfirm(reason.trim(), until)} disabled={!valid || saving || needsReload} style={valid ? { background: "#d97706" } : undefined}><Clock size={15} />Put on hold</Btn>
         </div>
         {!valid && <p className="mt-2 text-right text-xs text-slate-400">Enter a reason and a resume date to continue.</p>}
       </div>
+    </div>
+  );
+}
+
+function IssueSaveNotice({ error }) {
+  if (!error) return null;
+  const saved = error instanceof IssueRefreshError;
+  return (
+    <div role={saved ? "status" : "alert"} className={`rounded-lg p-3 text-sm ${saved ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-800"}`}>
+      {error instanceof Error ? error.message : String(error)}{!saved && " Your draft has been kept."}
     </div>
   );
 }
@@ -1129,7 +1149,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
       acceptSaved(await onUpdate(issue.id, patch, baseline.eTag));
       return true;
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(failure);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
     } finally { setSaving(false); }
@@ -1140,14 +1160,14 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   const reload = async () => {
     setSaving(true);
     try { acceptSaved(await onReload(issue.id)); setNeedsReload(false); setError(""); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
 
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to register</button>
-      {error && <div role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error} Your draft has been kept.</div>}
+      <IssueSaveNotice error={error} />
       {needsReload && <Btn disabled={saving} variant="ghost" onClick={reload}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1176,15 +1196,15 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           <Card className="p-4">
             <SectionTitle icon={ClipboardList}>QM assessment</SectionTitle>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Status"><Select value={d.status} onChange={(e) => set("status", e.target.value)} options={statusOptionsFor(d)} /></Field>
-              <Field label="Transformed into"><Select value={d.transformedInto} onChange={(e) => set("transformedInto", e.target.value)} options={TRANSFORM_TYPES} /></Field>
-              <Field label="Task owner"><TextInput value={d.taskOwner || ""} onChange={(e) => set("taskOwner", e.target.value)} placeholder="Full name" /></Field>
-              <Field label="Task owner Microsoft 365 email"><TextInput type="email" value={d.taskOwnerEmail || ""} onChange={(e) => set("taskOwnerEmail", e.target.value)} placeholder="owner@company.com" /></Field>
-              <Field label="Escalation BU"><Select value={d.ownerBU} onChange={(e) => set("ownerBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
-              <Field label="Due date" hint={`Default for ${d.severity}: ${SEVERITY_DUE_DAYS[d.severity]} days`}><TextInput type="date" value={d.dueDate || ""} onChange={(e) => set("dueDate", e.target.value)} /></Field>
-              <Field label="Task created"><Select value={d.taskCreated} onChange={(e) => set("taskCreated", e.target.value)} options={YESNO} /></Field>
+              <Field label="Status"><Select disabled={saving} value={d.status} onChange={(e) => set("status", e.target.value)} options={statusOptionsFor(d)} /></Field>
+              <Field label="Transformed into"><Select disabled={saving} value={d.transformedInto} onChange={(e) => set("transformedInto", e.target.value)} options={TRANSFORM_TYPES} /></Field>
+              <Field label="Task owner"><TextInput disabled={saving} value={d.taskOwner || ""} onChange={(e) => set("taskOwner", e.target.value)} placeholder="Full name" /></Field>
+              <Field label="Task owner Microsoft 365 email"><TextInput disabled={saving} type="email" value={d.taskOwnerEmail || ""} onChange={(e) => set("taskOwnerEmail", e.target.value)} placeholder="owner@company.com" /></Field>
+              <Field label="Escalation BU"><Select disabled={saving} value={d.ownerBU} onChange={(e) => set("ownerBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
+              <Field label="Due date" hint={`Default for ${d.severity}: ${SEVERITY_DUE_DAYS[d.severity]} days`}><TextInput disabled={saving} type="date" value={d.dueDate || ""} onChange={(e) => set("dueDate", e.target.value)} /></Field>
+              <Field label="Task created"><Select disabled={saving} value={d.taskCreated} onChange={(e) => set("taskCreated", e.target.value)} options={YESNO} /></Field>
             </div>
-            <div className="mt-3"><Field label="Follow up (Quality Team notes)"><TextArea value={d.followUp} onChange={(e) => set("followUp", e.target.value)} /></Field></div>
+            <div className="mt-3"><Field label="Follow up (Quality Team notes)"><TextArea disabled={saving} value={d.followUp} onChange={(e) => set("followUp", e.target.value)} /></Field></div>
             {d.status === "Closed" && (d.closedAt || d.closedDate) && (
               <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200">
                 <CheckCircle2 size={15} />Closed on {d.closedAt ? fmtDateTime(d.closedAt) : fmtDate(d.closedDate)}
@@ -1196,15 +1216,15 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             <Card className="border-violet-200 p-4">
               <SectionTitle icon={ShieldCheck}><span className="text-violet-700">Corrective action — ISO 9001 §10.2</span></SectionTitle>
               <div className="space-y-3">
-                <Field label="Root cause"><TextArea value={d.rootCause} onChange={(e) => set("rootCause", e.target.value)} placeholder="Why did this happen? (5 Whys / Ishikawa)" /></Field>
-                <Field label="Corrective action taken"><TextArea value={d.correctiveAction} onChange={(e) => set("correctiveAction", e.target.value)} /></Field>
+                <Field label="Root cause"><TextArea disabled={saving} value={d.rootCause} onChange={(e) => set("rootCause", e.target.value)} placeholder="Why did this happen? (5 Whys / Ishikawa)" /></Field>
+                <Field label="Corrective action taken"><TextArea disabled={saving} value={d.correctiveAction} onChange={(e) => set("correctiveAction", e.target.value)} /></Field>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Implementation date"><TextInput type="date" value={d.implementationDate || ""} onChange={(e) => set("implementationDate", e.target.value)} /></Field>
-                  <Field label="Verified by"><TextInput value={d.verifiedBy || ""} onChange={(e) => set("verifiedBy", e.target.value)} placeholder="Full name" /></Field>
-                  <Field label="Verifier Microsoft 365 email"><TextInput type="email" value={d.verifiedByEmail || ""} onChange={(e) => set("verifiedByEmail", e.target.value)} placeholder="verifier@company.com" /></Field>
+                  <Field label="Implementation date"><TextInput disabled={saving} type="date" value={d.implementationDate || ""} onChange={(e) => set("implementationDate", e.target.value)} /></Field>
+                  <Field label="Verified by"><TextInput disabled={saving} value={d.verifiedBy || ""} onChange={(e) => set("verifiedBy", e.target.value)} placeholder="Full name" /></Field>
+                  <Field label="Verifier Microsoft 365 email"><TextInput disabled={saving} type="email" value={d.verifiedByEmail || ""} onChange={(e) => set("verifiedByEmail", e.target.value)} placeholder="verifier@company.com" /></Field>
                 </div>
-                <Field label="Effectiveness check"><TextArea value={d.effectivenessCheck} onChange={(e) => set("effectivenessCheck", e.target.value)} placeholder="Evidence the action worked and the issue has not recurred." /></Field>
-                {d.verifiedBy && <Field label="Verification date"><TextInput type="date" value={d.verifiedDate || ""} onChange={(e) => set("verifiedDate", e.target.value)} /></Field>}
+                <Field label="Effectiveness check"><TextArea disabled={saving} value={d.effectivenessCheck} onChange={(e) => set("effectivenessCheck", e.target.value)} placeholder="Evidence the action worked and the issue has not recurred." /></Field>
+                {d.verifiedBy && <Field label="Verification date"><TextInput disabled={saving} type="date" value={d.verifiedDate || ""} onChange={(e) => set("verifiedDate", e.target.value)} /></Field>}
               </div>
             </Card>
           )}
@@ -1245,7 +1265,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           </Card>
         </div>
       </div>
-      <HoldDialog open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={saving} needsReload={needsReload} open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -1287,14 +1307,14 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
     setSaving(true); setError("");
     try { await onTriage(issue.id, patch, baseline.current.eTag); }
     catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(failure);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
     } finally { setSaving(false); }
   };
   const reload = async () => {
     setSaving(true);
     try { await onReload(issue.id); onBack(); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
   const [transformedInto, setT] = useState("OFI");
@@ -1314,7 +1334,7 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to triage queue</button>
-      {error && <p role="alert" className="text-sm text-rose-700">{error} Your draft has been kept.</p>}
+      <IssueSaveNotice error={error} />
       {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and return to queue</Btn>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <div className="lg:col-span-3"><IntakeSummary i={issue} /></div>
@@ -1322,13 +1342,13 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
           <Card className="p-4">
             <SectionTitle icon={ClipboardList}>Assess & decide</SectionTitle>
             <div className="space-y-3">
-              <Field label="Transform into"><Select value={transformedInto} onChange={(e) => setT(e.target.value)} options={TRANSFORM_TYPES} /></Field>
+              <Field label="Transform into"><Select disabled={saving} value={transformedInto} onChange={(e) => setT(e.target.value)} options={TRANSFORM_TYPES} /></Field>
               {nc && <p className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-700">Nonconformity selected — §10.2 corrective-action fields will open on the issue once created.</p>}
-              <Field label="Task owner (gets reminders)"><TextInput value={taskOwner} onChange={(e) => setOwner(e.target.value)} placeholder="Full name" /></Field>
-              <Field label="Task owner Microsoft 365 email"><TextInput type="email" value={taskOwnerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@company.com" /></Field>
-              <Field label="Escalation BU"><Select value={ownerBU} onChange={(e) => setBU(e.target.value)} options={BUSINESS_UNITS} /></Field>
-              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
-              <Field label="Follow up note (optional)"><TextArea value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
+              <Field label="Task owner (gets reminders)"><TextInput disabled={saving} value={taskOwner} onChange={(e) => setOwner(e.target.value)} placeholder="Full name" /></Field>
+              <Field label="Task owner Microsoft 365 email"><TextInput disabled={saving} type="email" value={taskOwnerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@company.com" /></Field>
+              <Field label="Escalation BU"><Select disabled={saving} value={ownerBU} onChange={(e) => setBU(e.target.value)} options={BUSINESS_UNITS} /></Field>
+              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput disabled={saving} type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
+              <Field label="Follow up note (optional)"><TextArea disabled={saving} value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
               <div className="flex flex-col gap-2 pt-1">
                 <Btn onClick={create} disabled={saving || needsReload}><CheckCircle2 size={15} />Create issue</Btn>
                 <Btn variant="danger" onClick={reject} disabled={saving || needsReload}><XCircle size={15} />Reject (no action)</Btn>
@@ -1344,7 +1364,7 @@ export function TriageForm({ issue, onBack, onTriage, onReload }) {
 /* ============================================================
    Reporter intake form (mirrors Q-Star)
    ============================================================ */
-function ReporterForm({ onSubmit, settings, reporterName }) {
+export function ReporterForm({ onSubmit, settings, reporterName }) {
   const blank = { shortSummary: "", description: "", immediateAction: "", severity: "", createdBy: reporterName, departmentBU: "", region: "", alreadyInContact: "", deviationType: "", issueOrigin: "", additionalComments: "", attachments: [] };
   const [f, setF] = useState(blank);
   const [done, setDone] = useState(null);
@@ -1355,6 +1375,7 @@ function ReporterForm({ onSubmit, settings, reporterName }) {
   const formUrl = settings?.msFormUrl;
 
   const submit = async () => {
+    if (submitting || !valid) return;
     setSubmitting(true);
     setSubmitError("");
     try {
@@ -1388,19 +1409,19 @@ function ReporterForm({ onSubmit, settings, reporterName }) {
         </a>
       )}
       <div className="space-y-3">
-        <Field label="Short summary *"><TextInput value={f.shortSummary} onChange={(e) => set("shortSummary", e.target.value)} placeholder="One line describing the issue" /></Field>
-        <Field label="Description *"><TextArea value={f.description} onChange={(e) => set("description", e.target.value)} placeholder="What happened, where, and when?" /></Field>
-        <Field label="Immediate action taken"><TextArea value={f.immediateAction} onChange={(e) => set("immediateAction", e.target.value)} placeholder="Any containment already done?" /></Field>
+        <Field label="Short summary *"><TextInput disabled={submitting} value={f.shortSummary} onChange={(e) => set("shortSummary", e.target.value)} placeholder="One line describing the issue" /></Field>
+        <Field label="Description *"><TextArea disabled={submitting} value={f.description} onChange={(e) => set("description", e.target.value)} placeholder="What happened, where, and when?" /></Field>
+        <Field label="Immediate action taken"><TextArea disabled={submitting} value={f.immediateAction} onChange={(e) => set("immediateAction", e.target.value)} placeholder="Any containment already done?" /></Field>
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Severity *"><Select value={f.severity} onChange={(e) => set("severity", e.target.value)} options={SEVERITIES} /></Field>
+          <Field label="Severity *"><Select disabled={submitting} value={f.severity} onChange={(e) => set("severity", e.target.value)} options={SEVERITIES} /></Field>
           <Field label="Reported by" hint="Your signed-in Microsoft 365 identity"><TextInput value={reporterName} readOnly /></Field>
-          <Field label="Department / Business Unit *"><Select value={f.departmentBU} onChange={(e) => set("departmentBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
-          <Field label="Region *"><Select value={f.region} onChange={(e) => set("region", e.target.value)} options={REGIONS} /></Field>
-          <Field label="Deviation type *"><Select value={f.deviationType} onChange={(e) => set("deviationType", e.target.value)} options={DEVIATION_TYPES} /></Field>
-          <Field label="Where does it come from? *"><Select value={f.issueOrigin} onChange={(e) => set("issueOrigin", e.target.value)} options={ORIGINS} /></Field>
-          <Field label="Already in contact with the dept?"><Select value={f.alreadyInContact} onChange={(e) => set("alreadyInContact", e.target.value)} options={YESNO} /></Field>
+          <Field label="Department / Business Unit *"><Select disabled={submitting} value={f.departmentBU} onChange={(e) => set("departmentBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
+          <Field label="Region *"><Select disabled={submitting} value={f.region} onChange={(e) => set("region", e.target.value)} options={REGIONS} /></Field>
+          <Field label="Deviation type *"><Select disabled={submitting} value={f.deviationType} onChange={(e) => set("deviationType", e.target.value)} options={DEVIATION_TYPES} /></Field>
+          <Field label="Where does it come from? *"><Select disabled={submitting} value={f.issueOrigin} onChange={(e) => set("issueOrigin", e.target.value)} options={ORIGINS} /></Field>
+          <Field label="Already in contact with the dept?"><Select disabled={submitting} value={f.alreadyInContact} onChange={(e) => set("alreadyInContact", e.target.value)} options={YESNO} /></Field>
         </div>
-        <Field label="Additional comments (optional)"><TextArea value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
+        <Field label="Additional comments (optional)"><TextArea disabled={submitting} value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
         <Field label="Attachment" hint="Attachments are not supported by this form yet."><div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-400"><Paperclip size={15} />File upload unavailable</div></Field>
         {submitError && <p className="text-sm text-rose-700">Could not submit: {submitError}</p>}
         <div className="flex justify-end pt-1"><Btn onClick={submit} disabled={!valid || submitting}><Send size={15} />{submitting ? "Submitting…" : "Submit report"}</Btn></div>
@@ -1464,10 +1485,10 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
         <SectionTitle icon={Link2}>Reporter intake — Microsoft Forms</SectionTitle>
         <div className="space-y-3">
           <Field label="Q-Star Microsoft Form URL" hint="The shareable link employees use to report issues">
-            <TextInput value={s.msFormUrl || ""} onChange={(e) => set("msFormUrl", e.target.value)} placeholder="https://forms.office.com/r/XXXXXXXXXX" />
+            <TextInput disabled={saving} value={s.msFormUrl || ""} onChange={(e) => set("msFormUrl", e.target.value)} placeholder="https://forms.office.com/r/XXXXXXXXXX" />
           </Field>
           <Field label="Form responses → SharePoint flow ID (optional)">
-            <TextInput value={s.flowId || ""} onChange={(e) => set("flowId", e.target.value)} />
+            <TextInput disabled={saving} value={s.flowId || ""} onChange={(e) => set("flowId", e.target.value)} />
           </Field>
         </div>
       </Card>
@@ -1655,7 +1676,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     setSaving(true); setError("");
     try { accept(await onUpdate(issue.id, buildIssueTransition(baseline, patch), baseline.eTag)); return true; }
     catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      setError(failure);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
     } finally { setSaving(false); }
@@ -1663,7 +1684,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
   const reload = async () => {
     setSaving(true);
     try { accept(await onReload(issue.id)); setNeedsReload(false); setError(""); }
-    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
   const nc = isNC(issue);
@@ -1675,7 +1696,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to my tasks</button>
-      {error && <p role="alert" className="text-sm text-rose-700">{error} Your draft has been kept.</p>}
+      <IssueSaveNotice error={error} />
       {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1716,8 +1737,8 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : nc ? (
               <div className="space-y-3">
-                <Field label="Status"><Select value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
-                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
+                <Field label="Status"><Select disabled={saving} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
+                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={saving} type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
                 <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <Btn variant="primary" disabled={saving || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
@@ -1725,7 +1746,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : (
               <div className="space-y-3">
-                <Field label="Status"><Select value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
+                <Field label="Status"><Select disabled={saving} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
                 <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <p className="text-xs text-slate-400">Closing and effectiveness verification are done by the Quality Team. Add a progress note to let them know when you're ready.</p>
@@ -1734,7 +1755,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
           </Card>
         </div>
       </div>
-      <HoldDialog open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={saving} needsReload={needsReload} open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -1771,6 +1792,8 @@ export default function App({
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loadError, setLoadError] = useState("");
   const [saveError, setSaveError] = useState("");
+  const [saveWarning, setSaveWarning] = useState(null);
+  const [reloadingSaved, setReloadingSaved] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
   const pendingWrites = useRef(new Set());
@@ -1799,21 +1822,32 @@ export default function App({
 
   const acceptIssue = (saved) => {
     setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
-    if (saved.saveWarning) setSaveError(saved.saveWarning);
+    setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
   const reloadIssue = async (id) => acceptIssue(await dataService.getIssue(id));
+  const reloadSavedIssue = async () => {
+    if (reloadingSaved) return;
+    setReloadingSaved(true);
+    try { await reloadIssue(saveWarning.issueId); }
+    catch (error) { setSaveWarning({ ...saveWarning, message: `Your change was saved, but reloading is still unavailable: ${error instanceof Error ? error.message : String(error)}. Do not submit it again.` }); }
+    finally { setReloadingSaved(false); }
+  };
   const updateIssue = async (id, patch, expectedETag) => {
     if (pendingWrites.current.has(id)) throw new Error("A save is already in progress. Wait for it to finish.");
     const previous = issues.find((issue) => issue.id === id);
     if (!previous) throw new Error("Issue is no longer available. Reload the register.");
+    if (!previous.eTag) throw new Error("Reload this issue before saving so its current version can be checked.");
     const normalized = buildIssueTransition(previous, patch);
     pendingWrites.current.add(id);
     setSaveError("");
     try {
       return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
+      if (error instanceof IssueRefreshError) {
+        setIssues((items) => items.map((item) => item.id === id ? { ...item, eTag: undefined } : item));
+        setSaveWarning({ message: error.message, issueId: id });
+      } else setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
     } finally { pendingWrites.current.delete(id); }
   };
@@ -1825,7 +1859,7 @@ export default function App({
       const saved = await dataService.addProgressLogEntry(id, signedEntry);
       setIssues((items) => items.map((item) => item.id === id
         ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
-      if (saved.saveWarning) setSaveError(saved.saveWarning);
+      if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
       return saved;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
@@ -1853,6 +1887,7 @@ export default function App({
   };
 
   const addIntake = async (form) => {
+    setSaveError("");
     const created = await dataService.createIssue({
       ...form,
       reportDate: iso(today()),
@@ -1882,7 +1917,7 @@ export default function App({
       additionalComments: form.additionalComments || "",
     });
     setIssues((currentIssues) => [...currentIssues, created]);
-    if (created.saveWarning) setSaveError(created.saveWarning);
+    if (created.saveWarning) setSaveWarning({ message: created.saveWarning, issueId: created.id });
     return created.qsNumber;
   };
 
@@ -1955,7 +1990,8 @@ export default function App({
         text: `Issue re-opened — corrective-action cycle restarted. Previous close: ${issue.closedAt ? fmtDateTime(issue.closedAt) : fmtDate(issue.closedDate)}${issue.verifiedBy ? `, effectiveness verified by ${issue.verifiedBy}` : ""}.`,
       });
     } catch (error) {
-      setSaveError("Issue was re-opened, but its journal note could not be saved. Add the note from the progress log.");
+      setSaveError("");
+      setSaveWarning({ message: "Issue was re-opened, but its journal note could not be saved. Add the note from the progress log.", issueId: id });
     }
   };
 
@@ -2036,7 +2072,11 @@ export default function App({
 
         <main className="mx-auto max-w-7xl px-4 py-5">
           {loadError && <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">Could not load SharePoint data: {loadError} <button className="ml-2 underline" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></div>}
-          {saveError && <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">A SharePoint change failed and was not saved: {saveError}</div>}
+          {saveError && <div role="alert" className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">A SharePoint change failed and was not saved: {saveError}</div>}
+          {saveWarning && <div role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+            Saved with a warning: {saveWarning.message}
+            {(!current || current.id !== saveWarning.issueId || current.eTag || current.status === "Closed") && <button disabled={reloadingSaved} className="ml-2 underline" onClick={reloadSavedIssue}>{reloadingSaved ? "Reloading…" : "Reload saved issue"}</button>}
+          </div>}
           {activeTab === "report" && !current && <div className="mb-4 text-sm text-slate-500">Submit a potential quality issue. It enters the Quality Team's triage queue for assessment.</div>}
           {body}
         </main>
