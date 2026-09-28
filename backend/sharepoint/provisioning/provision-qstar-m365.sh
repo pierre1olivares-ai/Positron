@@ -12,7 +12,8 @@
 #
 #  RUN
 #    SITE="https://contoso.sharepoint.com/sites/Quality" ./provision-qstar-m365.sh
-#    # set PERSON_AS_TEXT=1 to store owners as text + email columns.
+#    # REGION_MIGRATION=preview shows existing-row changes without writes.
+#    # REGION_MIGRATION=apply migrates legacy Region values during maintenance.
 #    # For a beta without groups, run provision-qstar-beta-m365.sh instead.
 # =====================================================================
 set -euo pipefail
@@ -23,6 +24,18 @@ PROGRESS="${PROGRESS:-Q-Star Progress Log}"
 CONFIG="${CONFIG:-Q-Star Config}"
 PERSON_AS_TEXT="${PERSON_AS_TEXT:-0}"
 CREATE_ROLE_GROUPS="${CREATE_ROLE_GROUPS:-1}"
+REGION_MIGRATION="${REGION_MIGRATION:-preserve}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SITE ISSUES CONFIG REGION_MIGRATION
+if [ "$PERSON_AS_TEXT" != "0" ]; then
+  echo "PersonAsText is incompatible with the web part. Use native Person columns." >&2
+  exit 1
+fi
+case "$REGION_MIGRATION" in
+  preserve|apply) ;;
+  preview) exec node "$SCRIPT_DIR/reconcile-qstar-m365.mjs" ;;
+  *) echo "REGION_MIGRATION must be preserve, preview, or apply." >&2; exit 1 ;;
+esac
 
 ADMIN_GROUP="${ADMIN_GROUP:-Q-Star Admins}"
 QM_GROUP="${QM_GROUP:-Q-Star Quality Managers}"
@@ -76,22 +89,26 @@ ensure_group() {
     m365 spo group add --webUrl "$SITE" --name "$name" --description "$description" >/dev/null
     echo "+ group '$name'"
   fi
-  if m365 spo web roleassignment add --webUrl "$SITE" --groupName "$name" --roleDefinitionId "$role_id" >/dev/null 2>&1; then
-    echo "  + site permission assigned"
-  else
-    echo "  = site permission exists/skip"
-  fi
+  m365 spo web roleassignment add --webUrl "$SITE" --groupName "$name" --roleDefinitionId "$role_id" >/dev/null
+  echo "  + site permission assigned"
 }
 
 # add_field <list> <field-xml> [view]   ; view=1 also adds to default view
 add_field() {
   local list="$1" xml="$2" view="${3:-0}" opts="AddFieldInternalNameHint"
-  [ "$view" = "1" ] && opts="${opts},AddToDefaultView"
-  local name; name="$(printf '%s' "$xml" | grep -o "Name='[^']*'" | head -1)"
-  if m365 spo field add --webUrl "$SITE" --listTitle "$list" --xml "$xml" --options "$opts" >/dev/null 2>&1; then
-    echo "  + $name"
+  [ "$view" = "1" ] && opts="${opts},AddFieldToDefaultView"
+  local name expected actual
+  name="$(printf '%s' "$xml" | sed -n "s/.* Name='\([^']*\)'.*/\1/p")"
+  expected="$(printf '%s' "$xml" | sed -n "s/.* Type='\([^']*\)'.*/\1/p")"
+  if actual="$(m365 spo field get --webUrl "$SITE" --listTitle "$list" --internalName "$name" --query TypeAsString --output text 2>/dev/null)"; then
+    if [ "$actual" != "$expected" ]; then
+      echo "Field $list/$name is $actual; expected $expected. Migrate it before provisioning; no data was converted." >&2
+      exit 1
+    fi
+    echo "  = $name"
   else
-    echo "  = (exists/skip) $name"
+    m365 spo field add --webUrl "$SITE" --listTitle "$list" --xml "$xml" --options "$opts" >/dev/null
+    echo "  + $name"
   fi
 }
 
@@ -140,7 +157,8 @@ echo "--- $ISSUES ---"
 ensure_list "$ISSUES"
 
 # Intake
-f_number   "$ISSUES" "QsNumber"           "Qs Number"               1 TRUE
+f_number   "$ISSUES" "QsNumber"           "Qs Number"               1 FALSE
+m365 spo field set --webUrl "$SITE" --listTitle "$ISSUES" --internalName QsNumber --Required false >/dev/null
 f_text     "$ISSUES" "ShortSummary"       "Short Summary"           1 TRUE
 f_note     "$ISSUES" "Description"         "Description"             0 TRUE
 f_note     "$ISSUES" "ImmediateAction"    "Immediate Action taken"  0
@@ -149,6 +167,9 @@ f_person   "$ISSUES" "ReportedBy"         "Reported By"             0
 f_dateonly "$ISSUES" "ReportDate"         "Report date"             1
 f_choice   "$ISSUES" "DepartmentBU"       "Department/Business Unit" "$BU_XML"       1 "" TRUE
 f_choice   "$ISSUES" "Region"             "Region"                  "$REGION_XML"   0 "" TRUE
+for field in Severity DepartmentBU Region; do
+  m365 spo field set --webUrl "$SITE" --listTitle "$ISSUES" --internalName "$field" --Required true >/dev/null
+done
 f_choice   "$ISSUES" "AlreadyInContact"   "Already in Contact"      "$YESNO_XML"
 f_choice   "$ISSUES" "DeviationType"      "Deviation Type"          "$DEVIATION_XML"
 f_choice   "$ISSUES" "Origin"             "Origin"                  "$ORIGIN_XML"
@@ -180,14 +201,17 @@ f_choice   "$ISSUES" "OwnerUpdate"       "Owner Update"            "$YESNO_XML" 
 f_datetime "$ISSUES" "OwnerUpdateAt"     "Owner Update At"         0
 f_note     "$ISSUES" "OwnerUpdateText"  "Owner Update Text"       0
 
-echo "  Indexes requested for Status, Triaged and DueDate. Verify them in List settings after provisioning."
+for field in Status Triaged DueDate; do
+  m365 spo field set --webUrl "$SITE" --listTitle "$ISSUES" --internalName "$field" --Indexed true >/dev/null
+done
 
 # =====================================================================
 #  Q-Star Progress Log (append-only child list)
 # =====================================================================
 echo "--- $PROGRESS ---"
 ensure_list "$PROGRESS"
-f_number   "$PROGRESS" "ParentItemId" "Parent Item Id" 1 TRUE TRUE
+f_number   "$PROGRESS" "ParentItemId" "Parent Item Id" 1 FALSE TRUE
+m365 spo field set --webUrl "$SITE" --listTitle "$PROGRESS" --internalName ParentItemId --Required false --Indexed true >/dev/null
 f_person   "$PROGRESS" "Author"       "Author"         1
 f_datetime "$PROGRESS" "EntryDate"    "Entry Date"     1
 f_note     "$PROGRESS" "EntryText"    "Text"           0 TRUE
@@ -199,6 +223,8 @@ echo "  (append-only: only ever create items in this list — never edit)"
 echo "--- $CONFIG ---"
 ensure_list "$CONFIG"
 f_note     "$CONFIG" "SettingsJson" "Settings JSON" 0
+f_number   "$CONFIG" "ReferenceOffset" "Reference Offset" 0
+node "$SCRIPT_DIR/reconcile-qstar-m365.mjs" "$STATUS_XML" "$BU_XML"
 
 echo "Done."
 if [ "$CREATE_ROLE_GROUPS" = "1" ]; then

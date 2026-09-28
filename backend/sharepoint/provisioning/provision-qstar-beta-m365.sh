@@ -17,4 +17,4 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export CREATE_ROLE_GROUPS=0
-exec "$SCRIPT_DIR/provision-qstar-m365.sh"
+exec bash "$SCRIPT_DIR/provision-qstar-m365.sh"

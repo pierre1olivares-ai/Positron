@@ -1,0 +1,11 @@
+{
+  "choices": ["Americas (Miami)", "Asia Pacific", "China (Shanghai)", "Eastern Europe (Vienna)", "Head Office (Neu-Isenburg)", "Western Europe (Amsterdam)"],
+  "aliases": {
+    "Germany": "Western Europe (Amsterdam)",
+    "Americas": "Americas (Miami)",
+    "China": "China (Shanghai)",
+    "Eastern Europe": "Eastern Europe (Vienna)",
+    "Head Office": "Head Office (Neu-Isenburg)",
+    "Western Europe": "Western Europe (Amsterdam)"
+  }
+}
