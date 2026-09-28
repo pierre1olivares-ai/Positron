@@ -1120,7 +1120,7 @@ function NCTestBanner({ i }) {
 /* ============================================================
    QM Issue detail (full edit)
    ============================================================ */
-export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author }) {
+export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false }) {
   const [d, setD] = useState(issue);
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
@@ -1239,15 +1239,16 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           <Card className="p-4">
             <SectionTitle icon={CheckCircle2}>Actions</SectionTitle>
             <div className="flex flex-col gap-2">
-              <Btn onClick={() => save()} disabled={!dirty || saving || needsReload}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save changes"}</Btn>
+              <Btn onClick={() => save()} disabled={!dirty || saving || needsReload || (issueBusy && d.status === "Closed")}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save changes"}</Btn>
               {nc && !inTest && d.status !== "Closed" && (
                 <Btn variant="primary" disabled={saving || needsReload} onClick={startTest} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Start {NC_TEST_MONTHS}-month effectiveness test</Btn>
               )}
               <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>
-              <Btn variant="primary" onClick={close} disabled={saving || needsReload || (nc && !testDone)} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
+              <Btn variant="primary" onClick={close} disabled={saving || needsReload || issueBusy || (nc && !testDone)} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
               <Btn variant="danger" disabled={saving || needsReload} onClick={() => save({ status: "Rejected", taskCreated: "No" })}><XCircle size={15} />Reject issue</Btn>
               {hadUpdate && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => save({ ownerUpdate: false })}>Acknowledge owner update</Btn>}
             </div>
+            {issueBusy && !saving && <p className="mt-2 text-xs text-slate-500">Wait for this issue's pending work to finish before closing.</p>}
             {nc && !testDone && d.status !== "Closed" && <p className="mt-2 text-xs text-cyan-700">{inTest ? `Closure unlocks when the test ends (${fmtDate(testEnd)}).` : "Closure unlocks after the effectiveness test completes."}</p>}
             {dirty && <p className="mt-2 text-xs text-amber-600">Unsaved changes.</p>}
           </Card>
@@ -1800,6 +1801,7 @@ export default function App({
   const [reloadToken, setReloadToken] = useState(0);
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
   const pendingOperations = useRef(new Map());
+  const [busyIssueIds, setBusyIssueIds] = useState([]);
   const [openId, setOpenId] = useState(null);
   const [regFilter, setRegFilter] = useState({ q: "", statuses: [], type: "", bu: "", overdueOnly: false });
 
@@ -1823,13 +1825,16 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
-  const runIssueOperation = (id, operation, requirePreviousSuccess = false) => {
+  const runIssueOperation = (id, operation) => {
     const previous = pendingOperations.current.get(id) || Promise.resolve();
-    const ready = requirePreviousSuccess ? previous : previous.catch(() => undefined);
-    const pending = ready.then(operation);
+    const pending = previous.catch(() => undefined).then(operation);
     pendingOperations.current.set(id, pending);
+    setBusyIssueIds(Array.from(pendingOperations.current.keys()));
     return pending.finally(() => {
-      if (pendingOperations.current.get(id) === pending) pendingOperations.current.delete(id);
+      if (pendingOperations.current.get(id) === pending) {
+        pendingOperations.current.delete(id);
+        setBusyIssueIds(Array.from(pendingOperations.current.keys()));
+      }
     });
   };
   const acceptIssue = (saved) => {
@@ -1845,22 +1850,27 @@ export default function App({
     catch (error) { setSaveWarning({ ...saveWarning, message: `Your change was saved, but reloading is still unavailable: ${error instanceof Error ? error.message : String(error)}. Do not submit it again.` }); }
     finally { setReloadingSaved(false); }
   };
-  const updateIssue = (id, patch, expectedETag) => runIssueOperation(id, async () => {
-    const previous = issues.find((issue) => issue.id === id);
-    if (!previous) throw new Error("Issue is no longer available. Reload the register.");
-    if (!previous.eTag) throw new Error("Reload this issue before saving so its current version can be checked.");
-    const normalized = buildIssueTransition(previous, patch);
-    setSaveError("");
-    try {
-      return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
-    } catch (error) {
-      if (error instanceof IssueRefreshError) {
-        setIssues((items) => items.map((item) => item.id === id ? { ...item, eTag: undefined } : item));
-        setSaveWarning({ message: error.message, issueId: id });
-      } else setSaveError(error instanceof Error ? error.message : String(error));
-      throw error;
+  const updateIssue = (id, patch, expectedETag) => {
+    if (patch.status === "Closed" && pendingOperations.current.has(id)) {
+      throw new Error("Wait for this issue's pending work to finish before closing. Try closing again once it finishes.");
     }
-  }, patch.status === "Closed");
+    return runIssueOperation(id, async () => {
+      const previous = issues.find((issue) => issue.id === id);
+      if (!previous) throw new Error("Issue is no longer available. Reload the register.");
+      if (!previous.eTag) throw new Error("Reload this issue before saving so its current version can be checked.");
+      const normalized = buildIssueTransition(previous, patch);
+      setSaveError("");
+      try {
+        return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
+      } catch (error) {
+        if (error instanceof IssueRefreshError) {
+          setIssues((items) => items.map((item) => item.id === id ? { ...item, eTag: undefined } : item));
+          setSaveWarning({ message: error.message, issueId: id });
+        } else setSaveError(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    });
+  };
 
   const addProgress = (id, entry) => runIssueOperation(id, async () => {
     const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
@@ -2023,7 +2033,7 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} onBack={back} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail issue={current} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
+        ? <QMIssueDetail issue={current} issueBusy={busyIssueIds.includes(current.id)} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
         : <TriageForm issue={current} onBack={back} onTriage={triage} onReload={reloadIssue} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
