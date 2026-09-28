@@ -22,7 +22,8 @@ param(
   [string]$ProgressList = "Q-Star Progress Log",
   [string]$ConfigList   = "Q-Star Config",
   [switch]$PersonAsText,
-  [ValidateSet("Preserve","Preview","Apply")][string]$RegionMigration = "Preserve"
+  [ValidateSet("Preserve","Preview","Apply")][string]$RegionMigration = "Preserve",
+  [ValidateSet("Preserve","Preview","Apply")][string]$ProgressMigration = "Preserve"
 )
 
 $parameters = @{
@@ -33,6 +34,7 @@ $parameters = @{
   ConfigList = $ConfigList
   SkipRoleGroups = $true
   RegionMigration = $RegionMigration
+  ProgressMigration = $ProgressMigration
 }
 
 if ($PersonAsText) {

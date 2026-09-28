@@ -1,10 +1,10 @@
-# Backend — data & automation layer
+# Backend — Microsoft 365 data and automation
 
-There is no custom API server for this system. The "backend" is Microsoft 365 itself:
+The backend consists of SharePoint lists and tenant Power Automate flows. The SPFx frontend accesses same-site SharePoint REST through PnPjs using the signed-in user's permissions.
 
-- **`sharepoint/`** — the SharePoint List that stores every issue, the field/column mapping, and the Microsoft Graph read/write data layer design that the frontend calls into (delegated auth, signed-in user, `Sites.Selected` scope only).
-  - `qstar-sharepoint-graph-integration.md` — column reference and Graph data layer design.
-  - `provisioning/` — separate beta entry points (`provision-qstar-beta.ps1` / `provision-qstar-beta-m365.sh`) for lists only, and production entry points (`provision-qstar.ps1` / `provision-qstar-m365.sh`) that also create role groups and permissions.
-- **`power-automate/`** — the intake flow (Microsoft Form → List item) and the daily reminder flow, documented step-by-step for building in the Power Automate designer.
+- [Integration contract](sharepoint/qstar-sharepoint-graph-integration.md): fields, native Person identities, reference allocation, secured progress folders, and settings.
+- [Provisioning and upgrades](sharepoint/provisioning/README.md): Bash/CLI and PnP PowerShell entry points, reviewed Region/history migration, and beta versus production permissions.
+- [Workflow build guide](power-automate/qstar-power-automate-flows.md): Forms intake, scheduled reminders and accepted updates, and assignment/folder ACL reconciliation. These instructions must be implemented and validated in the tenant; no deployed flows are included.
+- [Tenant verification](sharepoint/connection-test-plan.md): behavior and permissions that local automated checks cannot establish.
 
-See [`../CLAUDE.md`](../CLAUDE.md) for the full production constraints (no public-internet calls, single-site scope, no secrets in the frontend, data stays in the tenant).
+See [production constraints](../CLAUDE.md) for the single-site deployment and tenant data boundary. No application secrets belong in frontend settings.

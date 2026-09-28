@@ -3,10 +3,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const state = JSON.parse(readFileSync(process.env.QSTAR_TEST_STATE, 'utf8'));
-const command = args.slice(0, 3).join(' ');
+const command = args[0] === 'request' ? 'request' : args.slice(0, 3).join(' ');
 const value = name => args[args.indexOf(name) + 1];
 const options = {};
-for (let i = 3; i < args.length; i++) if (args[i].startsWith('--')) {
+for (let i = args[0] === 'request' ? 1 : 3; i < args.length; i++) if (args[i].startsWith('--')) {
   options[args[i].slice(2)] = args[i + 1]?.startsWith('--') || i === args.length - 1 ? true : args[++i];
 }
 const fail = message => { console.error(message); process.exit(1); };
@@ -21,6 +21,27 @@ let result;
 const title = options.listTitle || options.title;
 const list = state.lists[title];
 switch (command) {
+  case 'request': {
+    const parsed = new URL(options.url);
+    const path = decodeURIComponent(parsed.pathname + parsed.search).split('/_api/')[1];
+    const match = path.match(/getbytitle\('([^']+)'\)/);
+    const target = match ? state.lists[match[1]] : undefined;
+    if (match && !target) fail('List does not exist');
+    const root = title => `/sites/qstar/Lists/${title.replaceAll(' ', '')}`;
+    if (path.includes('RootFolder/ServerRelativeUrl')) result = {RootFolder:{ServerRelativeUrl:root(match[1])}};
+    else if (path.includes('TaskOwnerId')) result = {value:target.items};
+    else if (path.includes('FSObjType')) result = {value:target.items};
+    else if (path.includes('currentuser')) result = {Id:99};
+    else if (options['x-http-method'] === 'MERGE') Object.assign(target,JSON.parse(options.body));
+    else if (path.includes('RootFolder/Folders')) result = {value:(target.folders || []).map(ServerRelativeUrl=>({ServerRelativeUrl}))};
+    else if (path.startsWith('web/folders/addUsingPath')) {
+      const url = path.match(/DecodedUrl='([^']+)'/)[1];
+      const pair = Object.entries(state.lists).find(([name])=>url.startsWith(root(name)+'/'));
+      if (!pair) fail('Unexpected folder path');
+      pair[1].folders ||= []; if (!pair[1].folders.includes(url)) pair[1].folders.push(url);
+    } else fail(`Unexpected request: ${path}`);
+    break;
+  }
   case 'spo list get': if (!list) fail('List does not exist'); result = { Title: title }; break;
   case 'spo list add':
     state.lists[title] = { fields: { Author: field("<Field Type='User' Name='Author'/>"), Title: field("<Field Type='Text' Name='Title' Required='TRUE' />") }, items: [] };

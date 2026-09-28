@@ -28,7 +28,8 @@ param(
   [string]$ConfigList   = "Q-Star Config",
   [switch]$PersonAsText,
   [switch]$SkipRoleGroups,
-  [ValidateSet("Preserve","Preview","Apply")][string]$RegionMigration = "Preserve"
+  [ValidateSet("Preserve","Preview","Apply")][string]$RegionMigration = "Preserve",
+  [ValidateSet("Preserve","Preview","Apply")][string]$ProgressMigration = "Preserve"
 )
 
 $ErrorActionPreference = "Stop"
@@ -77,6 +78,13 @@ function Sync-Regions {
   }
 }
 if ($RegionMigration -eq "Preview") { Sync-Regions -Preview; return }
+$securityParameters = @{ SiteUrl = $SiteUrl; IssuesList = $IssuesList; ProgressList = $ProgressList; ConfigList = $ConfigList; Production = (-not $SkipRoleGroups); ProgressMigration = $ProgressMigration }
+if ($ProgressMigration -eq "Preview") { & "$PSScriptRoot/secure-qstar.ps1" @securityParameters; return }
+$progressPreflightDone = $false
+if (Get-PnPList -Identity $ProgressList -ErrorAction SilentlyContinue) {
+  & "$PSScriptRoot/secure-qstar.ps1" @securityParameters -Preflight
+  $progressPreflightDone = $true
+}
 
 # ---------- Role groups ----------
 function Ensure-RoleGroup {
@@ -91,15 +99,6 @@ function Ensure-RoleGroup {
   Set-PnPGroupPermissions -Identity $Name -AddRole $Role | Out-Null
 }
 
-if (-not $SkipRoleGroups) {
-  Write-Host "`n--- Q-Star role groups ---" -ForegroundColor Cyan
-  Ensure-RoleGroup -Name "Q-Star Admins" -Description "Q-Star application administrators" -Role "Full Control"
-  Ensure-RoleGroup -Name "Q-Star Quality Managers" -Description "Q-Star Quality Managers" -Role "Edit"
-  Ensure-RoleGroup -Name "Q-Star Task Owners" -Description "Q-Star task owners" -Role "Read"
-  Ensure-RoleGroup -Name "Q-Star Readers" -Description "Q-Star read-only users" -Role "Read"
-} else {
-  Write-Host "`n--- Q-Star role groups skipped by beta entry point ---" -ForegroundColor Yellow
-}
 
 # ---------- Helpers ----------
 function Ensure-List {
@@ -187,6 +186,7 @@ Ensure-Field -List $IssuesList -Display "Task Created"            -Internal "Tas
 # New fields (owner assignment, escalation, §10.2, NC effectiveness test)
 Ensure-Field -List $IssuesList -Display "Triaged"                -Internal "Triaged"           -Type Choice -Choices $YESNO -Default "No" -AddToView -Index
 Ensure-Field -List $IssuesList -Display "Task Owner"             -Internal "TaskOwner"         -Type Person -AddToView
+Ensure-Field -List $IssuesList -Display "Reminder Cycle" -Internal "ReminderCycle" -Type Text
 Ensure-Field -List $IssuesList -Display "Permissioned Owner Email" -Internal "PermissionedOwnerEmail" -Type Text
 Ensure-Field -List $IssuesList -Display "Escalation BU"          -Internal "EscalationBU"      -Type Choice -Choices $BU
 Ensure-Field -List $IssuesList -Display "Due Date"               -Internal "DueDate"           -Type DateTime -DateOnly -AddToView -Index
@@ -215,7 +215,7 @@ Ensure-Field -List $ProgressList -Display "Parent Item Id" -Internal "ParentItem
 Ensure-Field -List $ProgressList -Display "Author"         -Internal "Author"       -Type Person   -AddToView
 Ensure-Field -List $ProgressList -Display "Entry Date"     -Internal "EntryDate"    -Type DateTime -AddToView
 Ensure-Field -List $ProgressList -Display "Text"           -Internal "EntryText"    -Type Note     -Required
-Write-Host "  (enforce append-only by only ever creating items in this list — never edit them)" -ForegroundColor DarkGray
+
 
 # =====================================================================
 #  Q-Star Config (single-item settings store for the IT-settings tab)
@@ -246,11 +246,25 @@ if ($settings.Count -eq 1 -and $null -ne $settings[0]["ReferenceOffset"]) {
   Write-Host "ReferenceOffset initialized to $offset; existing QS references were not changed."
 }
 
+# Validate existing history before changing any permission assignments.
+if (-not $progressPreflightDone) { & "$PSScriptRoot/secure-qstar.ps1" @securityParameters -Preflight }
+if (-not $SkipRoleGroups) {
+  Write-Host "`n--- Q-Star role groups ---" -ForegroundColor Cyan
+  Ensure-RoleGroup -Name "Q-Star Admins" -Description "Q-Star application administrators" -Role "Full Control"
+  Ensure-RoleGroup -Name "Q-Star Quality Managers" -Description "Q-Star Quality Managers" -Role "Edit"
+  Ensure-RoleGroup -Name "Q-Star Task Owners" -Description "Q-Star task owners" -Role "Read"
+  Ensure-RoleGroup -Name "Q-Star Readers" -Description "Q-Star read-only users" -Role "Read"
+} else {
+  Write-Host "`n--- Q-Star role groups skipped by beta entry point ---" -ForegroundColor Yellow
+}
+
+& "$PSScriptRoot/secure-qstar.ps1" @securityParameters
+
 Write-Host "`nDone. Lists provisioned on $SiteUrl." -ForegroundColor Green
 if ($SkipRoleGroups) {
   Write-Host "Beta profile complete: no Q-Star groups or role assignments were created." -ForegroundColor Yellow
   Write-Host "Next: enable Beta access mode on the web part and use the site's existing Owners, Members, and Visitors."
 } else {
-  Write-Host "Production profile complete: four Q-Star role groups and site permissions were provisioned." -ForegroundColor Green
+  Write-Host "Production profile complete: list, issue, and journal-folder permissions reconciled." -ForegroundColor Green
   Write-Host "Next: add users or Entra groups to the Q-Star groups and configure the assignment-permission, intake, and reminder flows."
 }

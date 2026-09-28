@@ -25,8 +25,9 @@ CONFIG="${CONFIG:-Q-Star Config}"
 PERSON_AS_TEXT="${PERSON_AS_TEXT:-0}"
 CREATE_ROLE_GROUPS="${CREATE_ROLE_GROUPS:-1}"
 REGION_MIGRATION="${REGION_MIGRATION:-preserve}"
+PROGRESS_MIGRATION="${PROGRESS_MIGRATION:-preserve}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export SITE ISSUES CONFIG REGION_MIGRATION
+export SITE ISSUES PROGRESS CONFIG REGION_MIGRATION PROGRESS_MIGRATION CREATE_ROLE_GROUPS
 if [ "$PERSON_AS_TEXT" != "0" ]; then
   echo "PersonAsText is incompatible with the web part. Use native Person columns." >&2
   exit 1
@@ -37,10 +38,24 @@ case "$REGION_MIGRATION" in
   *) echo "REGION_MIGRATION must be preserve, preview, or apply." >&2; exit 1 ;;
 esac
 
+case "$PROGRESS_MIGRATION" in
+  preserve|apply) ;;
+  preview) exec node "$SCRIPT_DIR/secure-qstar-m365.mjs" ;;
+  *) echo "PROGRESS_MIGRATION must be preserve, preview, or apply." >&2; exit 1 ;;
+esac
+
 ADMIN_GROUP="${ADMIN_GROUP:-Q-Star Admins}"
 QM_GROUP="${QM_GROUP:-Q-Star Quality Managers}"
 OWNER_GROUP="${OWNER_GROUP:-Q-Star Task Owners}"
 READER_GROUP="${READER_GROUP:-Q-Star Readers}"
+export ADMIN_GROUP QM_GROUP OWNER_GROUP READER_GROUP
+
+# Existing journals must pass read-only mapping checks before any schema/ACL writes.
+PROGRESS_PREFLIGHT_DONE=0
+if m365 spo list get --webUrl "$SITE" --title "$PROGRESS" >/dev/null 2>&1; then
+  QSTAR_SECURITY_PREFLIGHT=1 node "$SCRIPT_DIR/secure-qstar-m365.mjs"
+  PROGRESS_PREFLIGHT_DONE=1
+fi
 
 # Built-in SharePoint permission-level IDs.
 ROLE_FULL_CONTROL=1073741829
@@ -79,6 +94,7 @@ ensure_list() {
     m365 spo list add --webUrl "$SITE" --title "$title" --baseTemplate GenericList >/dev/null
     echo "+ list '$title'"
   fi
+  m365 spo field set --webUrl "$SITE" --listTitle "$title" --internalName Title --Required false >/dev/null
 }
 
 ensure_group() {
@@ -140,15 +156,6 @@ f_person() {
 
 echo "Provisioning on $SITE"
 
-if [ "$CREATE_ROLE_GROUPS" = "1" ]; then
-  echo "--- Q-Star role groups ---"
-  ensure_group "$ADMIN_GROUP"  "Q-Star application administrators" "$ROLE_FULL_CONTROL"
-  ensure_group "$QM_GROUP"     "Q-Star Quality Managers"           "$ROLE_EDIT"
-  ensure_group "$OWNER_GROUP"  "Q-Star task owners"                "$ROLE_READ"
-  ensure_group "$READER_GROUP" "Q-Star read-only users"            "$ROLE_READ"
-else
-  echo "--- Q-Star role groups skipped by beta entry point ---"
-fi
 
 # =====================================================================
 #  Q-Star Issues
@@ -184,6 +191,7 @@ f_choice   "$ISSUES" "TaskCreated"        "Task Created"            "$YESNO_XML"
 # New fields (owner assignment, escalation, §10.2, NC effectiveness test)
 f_choice   "$ISSUES" "Triaged"            "Triaged"                 "$YESNO_XML"     1 "No" FALSE TRUE
 f_person   "$ISSUES" "TaskOwner"          "Task Owner"              1
+f_text     "$ISSUES" "ReminderCycle" "Reminder Cycle" 0
 f_text     "$ISSUES" "PermissionedOwnerEmail" "Permissioned Owner Email" 0
 f_choice   "$ISSUES" "EscalationBU"       "Escalation BU"           "$BU_XML"
 f_dateonly "$ISSUES" "DueDate"            "Due Date"                1 FALSE TRUE
@@ -215,7 +223,7 @@ m365 spo field set --webUrl "$SITE" --listTitle "$PROGRESS" --internalName Paren
 f_person   "$PROGRESS" "Author"       "Author"         1
 f_datetime "$PROGRESS" "EntryDate"    "Entry Date"     1
 f_note     "$PROGRESS" "EntryText"    "Text"           0 TRUE
-echo "  (append-only: only ever create items in this list — never edit)"
+
 
 # =====================================================================
 #  Q-Star Config (single-item settings store for the IT-settings tab)
@@ -226,11 +234,27 @@ f_note     "$CONFIG" "SettingsJson" "Settings JSON" 0
 f_number   "$CONFIG" "ReferenceOffset" "Reference Offset" 0
 node "$SCRIPT_DIR/reconcile-qstar-m365.mjs" "$STATUS_XML" "$BU_XML"
 
+# Validate existing history before changing any permission assignments.
+if [ "$PROGRESS_PREFLIGHT_DONE" = "0" ]; then
+  QSTAR_SECURITY_PREFLIGHT=1 node "$SCRIPT_DIR/secure-qstar-m365.mjs"
+fi
+if [ "$CREATE_ROLE_GROUPS" = "1" ]; then
+  echo "--- Q-Star role groups ---"
+  ensure_group "$ADMIN_GROUP"  "Q-Star application administrators" "$ROLE_FULL_CONTROL"
+  ensure_group "$QM_GROUP"     "Q-Star Quality Managers"           "$ROLE_EDIT"
+  ensure_group "$OWNER_GROUP"  "Q-Star task owners"                "$ROLE_READ"
+  ensure_group "$READER_GROUP" "Q-Star read-only users"            "$ROLE_READ"
+else
+  echo "--- Q-Star role groups skipped by beta entry point ---"
+fi
+
+node "$SCRIPT_DIR/secure-qstar-m365.mjs"
+
 echo "Done."
 if [ "$CREATE_ROLE_GROUPS" = "1" ]; then
-  echo "Production profile complete: four Q-Star role groups and site permissions were provisioned."
+  echo "Production profile complete: list, issue, and journal-folder permissions reconciled."
   echo "Next: add users or Entra security-group principals to the Q-Star groups."
-  echo "Configure the assignment flow to grant/revoke item Edit permission for the assigned Task Owner."
+  echo "Configure Flow C to reconcile issue Edit and journal Append on every assignment, including clearing."
 else
   echo "Beta profile complete: no Q-Star groups or role assignments were created."
   echo "Next: enable Beta access mode on the web part and use the site's existing Owners, Members, and Visitors."

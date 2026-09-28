@@ -35,6 +35,10 @@ test('beta launcher provisions complete native-person schema, indexes, and stabl
   for (const name of ['Status', 'Triaged', 'DueDate']) assert.equal(fields[name].Indexed, true);
   for (const name of ['Severity', 'Region', 'DepartmentBU']) assert.equal(fields[name].Required, true);
   assert.equal(fields.QsNumber.Required, false);
+  assert.equal(fields.ReminderCycle.TypeAsString, 'Text');
+  for (const list of Object.values(lists)) assert.equal(list.fields.Title.Required, false);
+  assert.equal(lists['Q-Star Progress Log'].EnableFolderCreation, true);
+  assert.equal(lists['Q-Star Progress Log'].ContentTypesEnabled, true);
   assert.deepEqual(fields.Region.Choices, schema.choices);
   assert.equal(lists['Q-Star Progress Log'].fields.ParentItemId.Required, false);
   assert.equal(lists['Q-Star Config'].items[0].ReferenceOffset, 1000);
@@ -86,4 +90,18 @@ test('a field creation failure stops provisioning instead of claiming it exists'
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /403 permission denied/);
   assert.equal(f.read().lists['Q-Star Config'], undefined);
+});
+
+test('unresolved existing journal parent stops the entry point before schema or permission writes', t => {
+  const f = fixture(t);
+  const original = {
+    'Q-Star Issues': {fields:{},items:[{Id:42,TaskOwnerId:7}]},
+    'Q-Star Progress Log': {fields:{},items:[{Id:9,FSObjType:0,ParentItemId:999,FileDirRef:'/sites/qstar/Lists/Q-StarProgressLog',FileRef:'/sites/qstar/Lists/Q-StarProgressLog/9_.000'}]},
+  };
+  f.write({lists:original,commands:[]});
+  const result = f.run();
+  assert.notEqual(result.status,0);
+  assert.match(result.stderr,/no valid existing parent/);
+  assert.deepEqual(f.read().lists,original);
+  assert.ok(f.read().commands.every(args=>args[0]==='request' ? args[args.indexOf('--method')+1]==='get' : args[2]==='get'));
 });
