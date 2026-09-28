@@ -12,7 +12,13 @@ Production SPFx 1.20 / React 17 web part for the validated Q-Star Issue Manager.
 - Connection Diagnostics validates access, schema, choices, indexes, and a required-field-safe create/update/delete round trip with cleanup for both Lists.
 - Recharts, Lucide, and generated Tailwind utilities are bundled in the `.sppkg`; production loads no Tailwind CDN.
 - Local development uses `MockDataService`; tenant builds use `SharePointDataService`.
-- Pure role, Person-value, field-map, and diagnostic-payload rules have an automated unit suite in `tests/`.
+- Saves send edited fields with the version read when editing began. Conflicts preserve the draft and offer an explicit reload; an accepted write followed by a failed refresh is not treated as a retryable submission.
+- New QS references use an immutable configured offset plus the SharePoint item ID. Existing references remain unchanged; browser and Forms intake use the same allocation rule.
+- Progress entries are appended under secured `issue-{id}` folders. SharePoint supplies author/time; folder paths determine the parent issue.
+- Every status save passes lifecycle validation, including the NC test period and verifier requirements. OFIs can close without NC-only fields.
+- Date-only values use calendar arithmetic and local formatting. SharePoint date envelopes are normalized for native date inputs and reminder comparisons.
+- Unit, service-contract, and real React interaction regressions live in `tests/`.
+- The Settings screen displays the actual connection. Change its site/lists in the web-part properties; changing the target remounts the app and resolves the role again.
 
 The original source and standalone preview remain in `prototype/` as the requirements/reference baseline.
 
@@ -51,7 +57,7 @@ Then open the tenant SharePoint Workbench with the debug-manifest query printed 
 ## Tenant work remaining
 
 1. Provision a dedicated development site with `backend/sharepoint/provisioning/`.
-2. For beta, leave group creation disabled and enable **Beta access mode** in the web part properties. Existing site Owners map to Admin, Members/editors to Quality Manager, and read-only visitors to Reader.
+2. For beta, use the explicit beta provisioning entry point and enable **Beta access mode** in the web part properties. Existing site Owners map to Admin, Members/editors to Quality Manager, and read-only visitors to Reader.
 3. Run Connection Diagnostics in the real tenant.
 4. Build the assignment-permission, intake, and reminder flows from `backend/power-automate/qstar-power-automate-flows.md`.
 5. Validate whether nested Entra groups are enumerated through SharePoint; add the documented `MSGraphClientV3` fallback only if required.
@@ -62,4 +68,4 @@ Use the explicitly named beta provisioning entry point for the pilot:
 - PowerShell: `provision-qstar-beta.ps1`
 - Microsoft 365 CLI: `provision-qstar-beta-m365.sh`
 
-The production entry points (`provision-qstar.ps1` and `provision-qstar-m365.sh`) create the lists plus all four Q-Star role groups and permissions.
+The production entry points (`provision-qstar.ps1` and `provision-qstar-m365.sh`) create the lists plus all four Q-Star role groups and reconcile list, issue, and progress-folder permissions. Review existing-data migrations first in [the provisioning guide](../backend/sharepoint/provisioning/README.md).

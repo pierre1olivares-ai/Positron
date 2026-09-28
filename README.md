@@ -1,6 +1,6 @@
 # Q-Star Issue Manager
 
-Quality-issue management tool for time:matters (Lufthansa Cargo group), built around ISO 9001:2015. Currently a working prototype, in progress of being productionized into an SPFx web part on SharePoint / Microsoft 365.
+Quality-issue management tool for time:matters (Lufthansa Cargo group), built around ISO 9001:2015. Implemented as an SPFx web part on SharePoint / Microsoft 365. Tenant provisioning, automation deployment, and acceptance testing remain required before production use.
 
 See [CLAUDE.md](CLAUDE.md) for full project context, domain notes, and next steps.
 
@@ -12,7 +12,7 @@ backend/    SharePoint List + Power Automate — data/automation layer. See back
 docs/       Cross-cutting project docs (rollout/implementation checklist).
 ```
 
-- **`frontend/`** — the scaffolded SPFx web part. `frontend/prototype/` holds the original validated React prototype and its clickable demo, kept as reference until its UI is ported into the real web part.
+- **`frontend/`** — the scaffolded SPFx web part. `frontend/prototype/` holds the original validated React prototype and its clickable demo, kept as a historical UI reference; the running implementation is under `frontend/src/`.
 - **`backend/`** — no custom server; the SharePoint List is the data store, Power Automate handles intake/reminders. See `backend/sharepoint/` and `backend/power-automate/`.
 - **`docs/`** — the non-developer rollout plan and IT ask list (`qstar-implementation-checklist.md`).
 
@@ -27,4 +27,4 @@ cd frontend && npm install
 npx gulp serve
 ```
 
-See [frontend/README.md](frontend/README.md) for what's implemented so far (data layer, connection diagnostics) and what's left (porting the prototype UI). Before testing against your company's tenant, provision the SharePoint lists (`backend/sharepoint/provisioning/`) and follow [`backend/sharepoint/connection-test-plan.md`](backend/sharepoint/connection-test-plan.md).
+See [frontend/README.md](frontend/README.md) for the implemented UI, data layer, and connection diagnostics. For upgrade order and regression coverage, see [the repair handoff](docs/qstar-review-repairs.md). Before testing against your company's tenant, provision the SharePoint lists (`backend/sharepoint/provisioning/`) and follow [`backend/sharepoint/connection-test-plan.md`](backend/sharepoint/connection-test-plan.md).

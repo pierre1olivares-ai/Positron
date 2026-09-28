@@ -11,12 +11,14 @@ import { IReadonlyTheme } from '@microsoft/sp-component-base';
 
 import * as strings from 'QstarIssueManagerWebPartStrings';
 import QstarIssueManager from './components/QstarIssueManager';
-import { IQstarIssueManagerProps } from './components/IQstarIssueManagerProps';
+import { IQstarConnection, IQstarIssueManagerProps } from './components/IQstarIssueManagerProps';
 import { SharePointDataService } from './services/SharePointDataService';
 import { ConnectionDiagnosticsService, ICheckResult } from './services/ConnectionDiagnosticsService';
 import { DEFAULT_ISSUES_LIST, DEFAULT_PROGRESS_LIST } from './services/fieldMap';
 import { DevelopmentRoleResolver, SharePointRoleResolver } from './services/SharePointRoleResolver';
 import { MockDataService } from './services/MockDataService';
+import type { IDataService } from './services/IDataService';
+import type { IRoleResolver } from './services/IRoleResolver';
 
 export interface IQstarIssueManagerWebPartProps {
   description: string;
@@ -30,29 +32,57 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
 
   private _isDarkTheme: boolean = false;
   private _environmentMessage: string = '';
+  private _connectionServices: {
+    key: string;
+    dataService: IDataService;
+    roleResolver: IRoleResolver;
+    diagnostics: ConnectionDiagnosticsService;
+  } | undefined;
 
   public render(): void {
     const issuesListName = this.properties.issuesListName || DEFAULT_ISSUES_LIST;
     const progressListName = this.properties.progressListName || DEFAULT_PROGRESS_LIST;
-    const siteUrl = this.properties.siteUrl || undefined;
+    const siteUrl = this.properties.siteUrl ? this.properties.siteUrl.trim().replace(/\/+$/, '') : undefined;
+    const connection: IQstarConnection = {
+      siteUrl: siteUrl || this.context.pageContext.web.absoluteUrl,
+      issuesListName,
+      progressListName,
+      betaAccessMode: !!this.properties.betaAccessMode
+    };
+    const connectionKey = JSON.stringify([
+      connection.siteUrl,
+      issuesListName,
+      progressListName,
+      connection.betaAccessMode,
+      this.context.isServedFromLocalhost,
+      this.context.pageContext.user.email
+    ]);
 
-    const dataService = this.context.isServedFromLocalhost
-      ? new MockDataService()
-      : new SharePointDataService(this.context, issuesListName, progressListName, siteUrl);
-    const diagnostics = new ConnectionDiagnosticsService(this.context, issuesListName, progressListName, siteUrl);
-    const roleResolver = this.context.isServedFromLocalhost
-      ? new DevelopmentRoleResolver('admin')
-      : new SharePointRoleResolver(this.context, undefined, siteUrl, !!this.properties.betaAccessMode);
+    if (!this._connectionServices || this._connectionServices.key !== connectionKey) {
+      this._connectionServices = {
+        key: connectionKey,
+        dataService: this.context.isServedFromLocalhost
+          ? new MockDataService()
+          : new SharePointDataService(this.context, issuesListName, progressListName, siteUrl),
+        diagnostics: new ConnectionDiagnosticsService(this.context, issuesListName, progressListName, siteUrl),
+        roleResolver: this.context.isServedFromLocalhost
+          ? new DevelopmentRoleResolver('admin')
+          : new SharePointRoleResolver(this.context, undefined, siteUrl, connection.betaAccessMode)
+      };
+    }
+    const { dataService, diagnostics, roleResolver } = this._connectionServices;
 
     const element: React.ReactElement<IQstarIssueManagerProps> = React.createElement(
       QstarIssueManager,
       {
+        key: connectionKey,
         description: this.properties.description,
         isDarkTheme: this._isDarkTheme,
         environmentMessage: this._environmentMessage,
         hasTeamsContext: !!this.context.sdks.microsoftTeams,
         userDisplayName: this.context.pageContext.user.displayName,
         userEmail: this.context.pageContext.user.email,
+        connection,
         dataService,
         roleResolver,
         runConnectionDiagnostics: (): Promise<ICheckResult[]> => diagnostics.run()

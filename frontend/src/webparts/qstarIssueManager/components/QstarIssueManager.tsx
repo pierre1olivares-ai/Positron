@@ -11,15 +11,26 @@ export interface IQstarIssueManagerState {
 }
 
 export default class QstarIssueManager extends React.Component<IQstarIssueManagerProps, IQstarIssueManagerState> {
+  private _mounted: boolean = false;
+
   public constructor(props: IQstarIssueManagerProps) {
     super(props);
     this.state = {};
   }
 
   public componentDidMount(): void {
+    this._mounted = true;
     this.props.roleResolver.resolve()
-      .then((roleResolution) => this.setState({ roleResolution, roleError: undefined }))
-      .catch((error: Error) => this.setState({ roleError: error.message }));
+      .then((roleResolution) => {
+        if (this._mounted) this.setState({ roleResolution, roleError: undefined });
+      })
+      .catch((error: Error) => {
+        if (this._mounted) this.setState({ roleError: error.message });
+      });
+  }
+
+  public componentWillUnmount(): void {
+    this._mounted = false;
   }
 
   public render(): React.ReactElement<IQstarIssueManagerProps> {
@@ -46,6 +57,7 @@ export default class QstarIssueManager extends React.Component<IQstarIssueManage
           profile={roleResolution.role}
           userDisplayName={this.props.userDisplayName}
           userEmail={this.props.userEmail}
+          connection={this.props.connection}
           developmentMode={roleResolution.source === "development"}
           onRunDiagnostics={this.props.runConnectionDiagnostics}
         />

@@ -77,7 +77,7 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 ### Phase D — Identity & permissions: the containment *(IT Security / Entra admin)*
 - [ ] **Beta:** enable the web part's Beta access mode and use the Communication site's existing Owners, Members, and Visitors permissions; provisioning skips Q-Star group creation by default.
 - [ ] **Production:** create the four SharePoint role groups (decision 1.3), add users, and nest the corresponding Entra security groups where required by IT governance.
-- [ ] Configure list permissions for Admin/QM edit and Reader read, plus item-level edit for the assigned Task Owner. Automate grant/revoke on assignment changes.
+- [ ] Run the current production provisioner to reconcile list permissions. Issues allow Admin/QM edit and assigned-owner item edit; Progress uses per-issue folders with Add/Read for the current owner and QM (no edit/delete); Config writes belong to Admins. Automate exact grant/revoke on assignment changes.
 - [ ] Validate nested Entra-group role resolution in the tenant. Only if needed, approve the smallest delegated Microsoft Graph group-membership permission for the SPFx solution.
 - [ ] If any Microsoft Graph **site data** access is later needed, register the app and grant **`Sites.Selected`** — restricted to **only the Q‑Star site** (see Section 4). It is not needed for the current same-site PnPjs data layer.
 - [ ] Confirm **no tenant‑wide permissions** are granted.
@@ -92,10 +92,11 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 
 ### Phase F — Automations: form + reminders *(IT Infra / Power Platform)*
 - [ ] Build the **intake Microsoft Form** (the "Report an issue" entry point).
-- [ ] Build the **three Power Automate flows** — intake, assignment permissions, and reminders/notifications. **You have the step‑by‑step build guide**: `qstar-power-automate-flows.md`. This is where assignment-level access and the owner-comment/status-change emails to Quality Managers are enforced.
+- [ ] Build the **Power Automate flow families** — intake, assignment permissions, and reminders/notifications, including dispatch of accepted progress entries. **You have the step‑by‑step build guide**: `qstar-power-automate-flows.md`. This is where assignment-level access and the owner-comment/status-change emails to Quality Managers are enforced.
 - [ ] Confirm reminder emails come from an approved mailbox or service account.
 
 ### Phase G — Test it properly (UAT) *(you + a few pilot users)*
+- [ ] Follow [the review repair rollout and regression checklist](qstar-review-repairs.md), including preview/apply migration, concurrent editors, owner reassignment/unassignment, and journal permissions.
 - [ ] Test each role end‑to‑end: Admin, Quality Manager, Task Owner, Reader.
 - [ ] Test the full lifecycle: report → triage → assign → progress → on‑hold → effectiveness test (NC) → close → re‑open.
 - [ ] Confirm reminders and the QM notifications actually arrive by email.
@@ -114,7 +115,7 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 
 | IT team | What they own | What to ask them for |
 |---|---|---|
-| **IT Infrastructure / Microsoft 365 & SharePoint admin** | SharePoint sites, the App Catalog, Microsoft Forms, Power Automate environment, service mailboxes | "Please create a dedicated SharePoint site for Q‑Star, create the Issues List using this provisioning script, deploy the supplied App Catalog package, and set up the intake Form and the three Power Automate flows from this guide." |
+| **IT Infrastructure / Microsoft 365 & SharePoint admin** | SharePoint sites, the App Catalog, Microsoft Forms, Power Automate environment, service mailboxes | "Please create a dedicated SharePoint site for Q‑Star, create the Issues List using this provisioning script, deploy the supplied App Catalog package, and set up the intake Form and the Power Automate flows from this guide." |
 | **IT Security / Identity (Entra ID / Azure AD)** | Sign‑in, security groups, app registrations & permissions, data classification, Conditional Access | "Please approve four Q‑Star SharePoint role groups backed by Entra security groups, validate nested membership, and confirm that permissions are enforced only on the Q‑Star site and assigned items. No tenant-wide permissions or custom login should be introduced." |
 | **IT Development** | The Git repository, packaging the app (SPFx), the SharePoint/Graph data layer, code review, long‑term maintenance | "Please put this React code into a managed Git repo, convert it to an SPFx web part that stores data in the SharePoint List (per this integration spec), bundle all assets locally with no external internet calls, and own the build/deploy." |
 | **(If you have one) Data Protection Officer / Compliance** | Personal‑data handling, retention | "Customer complaints may contain personal data — please confirm classification, retention, and any DPIA need." |
@@ -125,7 +126,7 @@ Each phase lists *what happens* and *who does it*. You drive; IT builds.
 
 ## 4. The "no access outside the repository" guarantee *(show this to IT Security)*
 
-This is the part that proves the tool is sandboxed. Ask IT Security to confirm each control:
+This section lists the controls IT must validate for the deployed tool. Ask IT Security to confirm each control:
 
 - [ ] **One dedicated site collection.** The app and its List live in a single SharePoint site; nothing else is in it.
 - [ ] **Site‑scoped permissions only.** If the app uses Microsoft Graph, it is granted **`Sites.Selected`** with access to **only the Q‑Star site by name** — the modern Microsoft control that prevents an app from reaching any other site. No `Sites.Read.All` / `Sites.FullControl.All` / tenant‑wide scopes.
@@ -135,7 +136,7 @@ This is the part that proves the tool is sandboxed. Ask IT Security to confirm e
 - [ ] **Data stays in the tenant.** All data lives in your SharePoint/Microsoft 365 tenant; nothing is sent to any outside service.
 - [ ] **Least privilege on the List.** List/site access is limited to the four role groups; assigned owners receive edit only on their own items, with grants revoked on reassignment.
 
-If all boxes are ticked, the tool is provably contained to its own repository/site.
+Validate these controls in the tenant. The current SPFx data layer acts as the signed-in user; it is not a separate security boundary restricting that user's existing access to other sites.
 
 ---
 
