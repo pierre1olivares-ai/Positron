@@ -1609,11 +1609,22 @@ export function SettingsView({ settings, onSave, onRunDiagnostics, connection })
 /* ============================================================
    Read-only issue detail (Owner viewing others' issues)
    ============================================================ */
-function ReadOnlyIssueDetail({ issue, onBack, onReopen, issueBusy = false }) {
-  const closed = issue.status === "Closed";
+function ReadOnlyIssueDetail({ issue, onBack, onReopen, onReload, issueBusy = false }) {
+  const [reloadError, setReloadError] = useState("");
+  const needsReload = !issue.eTag || issue.eTag === "*";
+  const reload = async () => {
+    if (issueBusy) return;
+    setReloadError("");
+    try { await onReload(issue.id); }
+    catch (error) { setReloadError(error instanceof Error ? error.message : String(error)); }
+  };
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to register</button>
+      {needsReload && <div className="space-y-2">
+        <Btn disabled={issueBusy} variant="ghost" onClick={reload}><RefreshCw size={15} />Reload this issue</Btn>
+        {reloadError && <p role="alert" className="text-sm text-rose-700">Could not reload this issue: {reloadError}</p>}
+      </div>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1631,7 +1642,7 @@ function ReadOnlyIssueDetail({ issue, onBack, onReopen, issueBusy = false }) {
               <RefreshCw size={16} className="mt-0.5 shrink-0" />
               <span><strong>This issue is closed.</strong> The full record and history below are read-only. Re-opening restarts the corrective-action cycle — status returns to In Progress and effectiveness must be verified again before it can be closed.</span>
             </div>
-            <Btn variant="primary" disabled={issueBusy || !issue.eTag} onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
+            <Btn variant="primary" disabled={issueBusy || needsReload} onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
           </div>
         </Card>
       )}
@@ -2160,13 +2171,13 @@ export default function App({
     const isClosed = current.status === "Closed";
     const issueBusy = busyIssueIds.includes(current.id);
     if (profile === "reader") {
-      body = <ReadOnlyIssueDetail issue={current} onBack={back} />;
+      body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (profile === "owner") {
       body = !readOnlyCurrent
         ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
-        : <ReadOnlyIssueDetail issue={current} onBack={back} />;
+        : <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (isClosed) {
-      body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReopen={() => reopen(current.id)} />;
+      body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
         ? <QMIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />

@@ -1403,6 +1403,126 @@ for (const transformedInto of ["OFI", "NC Minor"] as const) {
 }
 
 for (const action of ["Verify & close", "Save changes"]) {
+  test(`${action} retains issue-specific reload and recovery after another issue replaces its warning`, async () => {
+    let first = issue({ transformedInto: "OFI" });
+    let second = issue({ id: 2, qsNumber: 1002, transformedInto: "OFI" });
+    const reloads = [deferred<IIssue>(), deferred<IIssue>()];
+    const readIds: number[] = [];
+    let firstReads = 0;
+    let writes = 0;
+    let appends = 0;
+    await renderApp({
+      updateIssue: async (id: number, patch: Partial<IIssue>, eTag: string) => {
+        assert.equal(id, first.id);
+        assert.equal(eTag, '"1"');
+        assert.equal(patch.status, "Closed");
+        writes += 1;
+        first = { ...first, ...patch, eTag: '"2"' };
+        throw new IssueRefreshError(id);
+      },
+      addProgressLogEntry: async (id: number, entry: IProgressLogEntry) => {
+        assert.equal(id, second.id);
+        appends += 1;
+        const saved = { ...entry, id: appends, saveWarning: `Issue B journal entry ${appends} was saved; reload its details.` };
+        second = { ...second, progressLog: [...second.progressLog, saved] };
+        return saved;
+      },
+      getIssue: (id: number) => {
+        readIds.push(id);
+        if (id === first.id) return reloads[firstReads++].promise;
+        assert.equal(id, second.id);
+        return Promise.resolve(second);
+      },
+    }, [first, second]);
+    await click("Issue register");
+    await openIssue(1001);
+    change("Follow up (Quality Team notes)", "Accepted A assessment");
+    writeProgress("Keep A's unposted evidence");
+    if (action === "Save changes") change("Status", "Closed");
+    await click(action);
+    assertSavedWarning();
+    const recovered = [{ "Unposted progress note": "Keep A's unposted evidence" }];
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(button("Re-open issue").disabled, true);
+    await click("Back to register");
+    await openIssue(1002);
+    writeProgress("B's first observation");
+    await click("Add update");
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 1 was saved/);
+    await click("Reload saved issue");
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.deepEqual(readIds, [second.id]);
+    await click("Back to register");
+    await openIssue(1001);
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(button("Re-open issue").disabled, true);
+    await click("Reload this issue");
+    assert.equal(button("Reload this issue").disabled, true);
+    assert.equal(button("Re-open issue").disabled, true);
+    act(() => { button("Reload this issue").click(); button("Re-open issue").click(); });
+    assert.equal(firstReads, 1);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await act(async () => { reloads[0].reject(new Error("Issue A reload unavailable")); });
+    assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Could not reload this issue: Issue A reload unavailable/);
+    assert.doesNotMatch(container.textContent || "", /failed and was not saved/);
+    assert.match(container.textContent || "", /Closed · read-only/);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(button("Re-open issue").disabled, true);
+    assert.equal(button("Reload this issue").disabled, false);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Back to register");
+    await openIssue(1002);
+    writeProgress("B's second observation");
+    await click("Add update");
+    await click("Back to register");
+    await openIssue(1001);
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 2 was saved/);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Reload this issue");
+    assert.equal(button("Reload this issue").disabled, true);
+    assert.equal(button("Re-open issue").disabled, true);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await act(async () => { reloads[1].resolve(first); });
+    assert.deepEqual(readIds, [second.id, first.id, first.id]);
+    assert.equal(container.querySelector('[role="alert"]'), null);
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 2 was saved/);
+    assert.equal(button("Re-open issue").disabled, false);
+    assert.equal(Array.from(container.querySelectorAll("button")).some(element => element.textContent === "Reload this issue"), false);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Back to register");
+    await openIssue(1001);
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(button("Re-open issue").disabled, false);
+    assert.equal(writes, 1);
+    assert.equal(appends, 2);
+  });
+}
+
+for (const [profile, eTag] of [["owner", undefined], ["reader", "*"]] as const) {
+  test(`${profile} can reload a read-only issue with an unusable version without gaining edit controls`, async () => {
+    const original = issue({ status: "Closed", eTag });
+    let reads = 0;
+    const services = {
+      getIssue: async (id: number) => { assert.equal(id, original.id); reads += 1; return { ...original, eTag: '"2"' }; },
+    };
+    await renderApp(services, [original]);
+    await click("Issue register");
+    await openIssue();
+    assert.equal(button("Re-open issue").disabled, true);
+    await renderApp(services, [original], { profile, userDisplayName: "Owner", userEmail: "owner@example.com" });
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.equal(button("Reload this issue").disabled, false);
+    await click("Reload this issue");
+    assert.equal(reads, 1);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(Array.from(container.querySelectorAll("button")).some(element => ["Reload this issue", "Re-open issue", "Save changes", "Add update"].includes(element.textContent || "")), false);
+  });
+}
+
+for (const action of ["Verify & close", "Save changes"]) {
   for (const readbackFails of [false, true]) {
     test(`${action} ${readbackFails ? "accepted readback failure" : "accepted closure"} across remount blocks an already queued append`, async () => {
       let stored = issue({ transformedInto: "OFI" });
