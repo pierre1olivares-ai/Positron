@@ -944,7 +944,7 @@ function Register({ issues, onOpen, filter, setFilter }) {
 /* ============================================================
    Progress log (append-only, immutable)
    ============================================================ */
-export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false }) {
+export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange }) {
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -965,7 +965,7 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false }
       <SectionTitle icon={ListChecks} right={<span className="inline-flex items-center gap-1 text-xs text-slate-400"><Lock size={12} />Timestamped · cannot be edited or deleted</span>}>Progress log</SectionTitle>
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <TextArea disabled={disabled || saving} value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
+          <TextArea disabled={disabled || saving} value={text} onChange={(e) => { setText(e.target.value); onDraftChange?.(e.target.value); }} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
             <Btn disabled={disabled || !text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
@@ -1044,19 +1044,22 @@ function HoldBanner({ i }) {
   );
 }
 
-function HoldDialog({ open, initialReason, initialUntil, onCancel, onConfirm, saving, needsReload }) {
+function HoldDialog({ open, initialReason, initialUntil, onCancel, onConfirm, saving, needsReload, onDraftChange }) {
   const [reason, setReason] = useState("");
   const [until, setUntil] = useState("");
   useEffect(() => { if (open) { setReason(initialReason || ""); setUntil(initialUntil || ""); } }, [open]);
   if (!open) return null;
   const valid = reason.trim() && until;
+  const record = (holdReason, holdUntil) => onDraftChange?.(unsavedDetailFields(
+    { holdReason: initialReason || "", holdUntil: initialUntil || "" }, { holdReason, holdUntil }
+  ));
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={saving ? undefined : onCancel}>
       <div className="w-full max-w-md rounded-xl bg-white p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <div className="mb-1 flex items-center gap-2"><Clock size={18} className="text-amber-500" /><h3 className="text-base font-bold text-slate-900">Put issue on hold</h3></div>
         <p className="mb-3 text-sm text-slate-500">Both fields are required. The owner and Quality Team will be reminded a week before the resume date and again on the day.</p>
-        <Field label="Reason for hold *"><TextArea disabled={saving} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this issue being paused?" /></Field>
-        <div className="mt-3"><Field label="Resume work on *" hint="When work on the mitigation will continue"><TextInput disabled={saving} type="date" value={until} min={iso(today())} onChange={(e) => setUntil(e.target.value)} /></Field></div>
+        <Field label="Reason for hold *"><TextArea disabled={saving} value={reason} onChange={(e) => { setReason(e.target.value); record(e.target.value, until); }} placeholder="Why is this issue being paused?" /></Field>
+        <div className="mt-3"><Field label="Resume work on *" hint="When work on the mitigation will continue"><TextInput disabled={saving} type="date" value={until} min={iso(today())} onChange={(e) => { setUntil(e.target.value); record(reason, e.target.value); }} /></Field></div>
         <div className="mt-4 flex justify-end gap-2">
           <Btn variant="ghost" disabled={saving} onClick={onCancel}>Cancel</Btn>
           <Btn variant="primary" onClick={() => onConfirm(reason.trim(), until)} disabled={!valid || saving || needsReload} style={valid ? { background: "#d97706" } : undefined}><Clock size={15} />Put on hold</Btn>
@@ -1074,6 +1077,48 @@ function IssueSaveNotice({ error }) {
     <div role={saved ? "status" : "alert"} className={`rounded-lg p-3 text-sm ${saved ? "bg-amber-50 text-amber-800" : "bg-rose-50 text-rose-800"}`}>
       {error instanceof Error ? error.message : String(error)}{!saved && " Your draft has been kept."}
     </div>
+  );
+}
+
+const DRAFT_FIELD_LABELS = {
+  status: "Status", transformedInto: "Transformed into", taskOwner: "Task owner",
+  taskOwnerEmail: "Task owner Microsoft 365 email", ownerBU: "Escalation BU", dueDate: "Due date",
+  taskCreated: "Task created", followUp: "Quality Team notes", rootCause: "Root cause",
+  correctiveAction: "Corrective action taken", implementationDate: "Implementation date",
+  verifiedBy: "Verified by", verifiedByEmail: "Verifier Microsoft 365 email",
+  effectivenessCheck: "Effectiveness check", verifiedDate: "Verification date",
+  holdReason: "Reason for hold", holdUntil: "Resume work on",
+};
+
+function unsavedDetailFields(baseline, draft) {
+  return Object.keys(DRAFT_FIELD_LABELS).reduce((fields, key) => {
+    if (baseline[key] !== draft[key]) fields[key] = draft[key];
+    return fields;
+  }, {});
+}
+
+function replaceDraftPart(drafts, id, part, value) {
+  const next = { ...drafts };
+  const draft = { ...next[id] };
+  if (typeof value === "string" ? value.trim() : Object.keys(value).length) draft[part] = value;
+  else delete draft[part];
+  if (Object.keys(draft).length) next[id] = draft;
+  else delete next[id];
+  return next;
+}
+
+function DraftRecovery({ draft, onDiscard }) {
+  const fields = { ...draft.detail, ...draft.hold };
+  return (
+    <section aria-label="Unsaved draft recovery" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
+      <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery</h3>
+      <p className="mt-1 text-sm text-amber-900">This issue is now read-only. These unsaved details are kept for this session so you can select and copy them. They have not been submitted.</p>
+      <dl className="mt-3 space-y-2 text-sm" style={{ userSelect: "text" }}>
+        {Object.keys(fields).map((key) => <div key={key}><dt className="font-semibold">{DRAFT_FIELD_LABELS[key]}</dt><dd className="whitespace-pre-wrap">{fields[key] || "(Cleared)"}</dd></div>)}
+        {draft.progress && <div><dt className="font-semibold">Unposted progress note</dt><dd className="whitespace-pre-wrap">{draft.progress}</dd></div>}
+      </dl>
+      <Btn variant="ghost" className="mt-3" onClick={onDiscard}>Discard recovered draft</Btn>
+    </section>
   );
 }
 
@@ -1120,7 +1165,7 @@ function NCTestBanner({ i }) {
 /* ============================================================
    QM Issue detail (full edit)
    ============================================================ */
-export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false }) {
+export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false, onDraftChange }) {
   const [d, setD] = useState(issue);
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
@@ -1130,7 +1175,11 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   const [holdOpen, setHoldOpen] = useState(false);
   const [hadUpdate, setHadUpdate] = useState(issue.ownerUpdate); // header badge, snapshot per opened issue
   useEffect(() => { setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setError(""); setNeedsReload(!issue.eTag); }, [issue.id]);
-  const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
+  const set = (k, v) => {
+    const next = { ...d, [k]: v };
+    setD(next);
+    onDraftChange?.(issue.id, "detail", unsavedDetailFields(baseline, next));
+  };
   const dirty = Object.keys(changedIssueFields(baseline, d)).length > 0;
   useEffect(() => {
     if (!issueBusy && !dirty && issue !== baseline) {
@@ -1148,8 +1197,8 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
     if (busy || needsReload) return false;
     setSaving(true);
     setError("");
+    const next = { ...d, ...extra };
     try {
-      const next = { ...d, ...extra };
       if (next.taskOwner && !next.taskOwnerEmail) throw new Error("Enter the task owner's Microsoft 365 email.");
       if (next.verifiedBy && !next.verifiedByEmail && !next.verifiedById) throw new Error("Enter the verifier's Microsoft 365 email.");
       const patch = buildIssueTransition(baseline, changedIssueFields(baseline, next));
@@ -1157,6 +1206,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
       return true;
     } catch (failure) {
       setError(failure);
+      if (failure instanceof IssueRefreshError) acceptSaved({ ...next, eTag: undefined });
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
     } finally { setSaving(false); }
@@ -1236,7 +1286,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -1273,7 +1323,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
           </Card>
         </div>
       </div>
-      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={d.holdReason} initialUntil={d.holdUntil} onDraftChange={(fields) => onDraftChange?.(issue.id, "hold", fields)} onCancel={() => { setHoldOpen(false); onDraftChange?.(issue.id, "hold", {}); }} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -1678,7 +1728,7 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false }) {
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange }) {
   const [baseline, setBaseline] = useState(issue);
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
@@ -1695,12 +1745,16 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     }
   }, [issue, issueBusy]);
   const accept = (saved) => { setBaseline(saved); setStatus(saved.status); setImpl(saved.implementationDate || ""); };
+  const record = (nextStatus, implementationDate) => onDraftChange?.(issue.id, "detail", unsavedDetailFields(
+    baseline, { ...baseline, status: nextStatus, implementationDate }
+  ));
   const persist = async (patch) => {
     if (busy || needsReload) return false;
     setSaving(true); setError("");
     try { accept(await onUpdate(issue.id, buildIssueTransition(baseline, patch), baseline.eTag)); return true; }
     catch (failure) {
       setError(failure);
+      if (failure instanceof IssueRefreshError) accept({ ...baseline, ...patch, eTag: undefined });
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
     } finally { setSaving(false); }
@@ -1749,7 +1803,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               {issue.followUp && <ReadRow label="QM follow-up note" value={<span className="whitespace-pre-wrap">{issue.followUp}</span>} />}
             </dl>
           </Card>
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={owner} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
         </div>
 
         <div className="lg:col-span-2">
@@ -1761,8 +1815,8 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : nc ? (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
-                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={busy} type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => { setStatus(e.target.value); record(e.target.value, impl); }} options={ownerOpts} /></Field>
+                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={busy} type="date" value={impl} onChange={(e) => { setImpl(e.target.value); record(status, e.target.value); }} /></Field>
                 <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <Btn variant="primary" disabled={busy || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
@@ -1770,7 +1824,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => { setStatus(e.target.value); record(e.target.value, impl); }} options={ownerOpts} /></Field>
                 <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <p className="text-xs text-slate-400">Closing and effectiveness verification are done by the Quality Team. Add a progress note to let them know when you're ready.</p>
@@ -1779,7 +1833,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
           </Card>
         </div>
       </div>
-      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onCancel={() => setHoldOpen(false)} onConfirm={putOnHold} />
+      <HoldDialog saving={busy} needsReload={needsReload} open={holdOpen} initialReason={issue.holdReason} initialUntil={issue.holdUntil} onDraftChange={(fields) => onDraftChange?.(issue.id, "hold", fields)} onCancel={() => { setHoldOpen(false); onDraftChange?.(issue.id, "hold", {}); }} onConfirm={putOnHold} />
     </div>
   );
 }
@@ -1822,6 +1876,7 @@ export default function App({
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
   const pendingOperations = useRef(new Map());
   const [busyIssueIds, setBusyIssueIds] = useState([]);
+  const [issueDrafts, setIssueDrafts] = useState({});
   const [openId, setOpenId] = useState(null);
   const [regFilter, setRegFilter] = useState({ q: "", statuses: [], type: "", bu: "", overdueOnly: false });
 
@@ -1845,6 +1900,24 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
+  const recordDraft = (id, part, value) => setIssueDrafts((drafts) => replaceDraftPart(drafts, id, part, value));
+  const clearSubmittedDetail = (id, patch) => setIssueDrafts((drafts) => {
+    if (!drafts[id]) return drafts;
+    let next = drafts;
+    for (const part of ["detail", "hold"]) {
+      const fields = { ...drafts[id][part] };
+      for (const key of Object.keys(fields)) {
+        const value = part === "hold" && key === "holdReason" ? fields[key].trim() : fields[key];
+        if (value === patch[key]) delete fields[key];
+      }
+      next = replaceDraftPart(next, id, part, fields);
+    }
+    return next;
+  });
+  const discardDetail = (id) => setIssueDrafts((drafts) =>
+    replaceDraftPart(replaceDraftPart(drafts, id, "detail", {}), id, "hold", {}));
+  const closeIssue = (id) => setOpenId((activeId) => activeId === id ? null : activeId);
+
   const runIssueOperation = (id, operation) => {
     const previous = pendingOperations.current.get(id) || Promise.resolve();
     const pending = previous.catch(() => undefined).then(operation);
@@ -1862,7 +1935,11 @@ export default function App({
     setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
-  const reloadIssue = (id) => runIssueOperation(id, async () => acceptIssue(await dataService.getIssue(id)));
+  const reloadIssue = (id, discard = false) => runIssueOperation(id, async () => {
+    const saved = await dataService.getIssue(id);
+    if (discard) discardDetail(id);
+    return acceptIssue(saved);
+  });
   const reloadSavedIssue = async () => {
     if (reloadingSaved) return;
     setReloadingSaved(true);
@@ -1881,9 +1958,12 @@ export default function App({
       const normalized = buildIssueTransition(previous, patch);
       setSaveError("");
       try {
-        return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
+        const saved = await dataService.updateIssue(id, normalized, expectedETag || previous.eTag);
+        clearSubmittedDetail(id, patch);
+        return acceptIssue(saved);
       } catch (error) {
         if (error instanceof IssueRefreshError) {
+          clearSubmittedDetail(id, patch);
           setIssues((items) => items.map((item) => item.id === id ? { ...item, eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
         } else setSaveError(error instanceof Error ? error.message : String(error));
@@ -1897,6 +1977,8 @@ export default function App({
     setSaveError("");
     try {
       const saved = await dataService.addProgressLogEntry(id, signedEntry);
+      setIssueDrafts((drafts) => drafts[id]?.progress?.trim() === entry.text
+        ? replaceDraftPart(drafts, id, "progress", "") : drafts);
       setIssues((items) => items.map((item) => item.id === id
         ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
       if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
@@ -1922,7 +2004,7 @@ export default function App({
   };
   const triage = async (id, patch, expectedETag) => {
     const saved = await updateIssue(id, patch, expectedETag);
-    setOpenId(null);
+    closeIssue(id);
     return saved;
   };
 
@@ -2035,11 +2117,12 @@ export default function App({
     }
   };
 
-  const back = () => setOpenId(null);
+  const back = () => closeIssue(current.id);
   const ownsCurrent = current && (
     current.taskOwnerEmail ? current.taskOwnerEmail.toLowerCase() === userEmail.toLowerCase() :
     current.taskOwner === userDisplayName
   );
+  const readOnlyCurrent = current && (profile === "reader" || current.status === "Closed" || (profile === "owner" && !ownsCurrent));
   let body;
   if (current) {
     const isClosed = current.status === "Closed";
@@ -2048,13 +2131,13 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (profile === "owner") {
       body = (!isClosed && ownsCurrent)
-        ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={reloadIssue} onAddProgress={ownerAddProgress} />
+        ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
         : <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (isClosed) {
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
+        ? <QMIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />
         : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
@@ -2119,6 +2202,11 @@ export default function App({
             {(!current || current.id !== saveWarning.issueId || current.eTag || current.status === "Closed") && <button disabled={reloadingSaved} className="ml-2 underline" onClick={reloadSavedIssue}>{reloadingSaved ? "Reloading…" : "Reload saved issue"}</button>}
           </div>}
           {activeTab === "report" && !current && <div className="mb-4 text-sm text-slate-500">Submit a potential quality issue. It enters the Quality Team's triage queue for assessment.</div>}
+          {readOnlyCurrent && issueDrafts[current.id] && <DraftRecovery draft={issueDrafts[current.id]} onDiscard={() => setIssueDrafts((drafts) => {
+            const next = { ...drafts };
+            delete next[current.id];
+            return next;
+          })} />}
           {body}
         </main>
 
