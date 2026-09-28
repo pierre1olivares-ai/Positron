@@ -1241,10 +1241,22 @@ function recoveryPanel(): HTMLElement | null {
   return container.querySelector('section[aria-label="Unsaved draft recovery"]');
 }
 
-function recoveredFields(): Record<string, string> {
-  const panel = recoveryPanel();
+function recoveredFields(panel = recoveryPanel()): Record<string, string> {
   assert.ok(panel, "Unsaved draft recovery should be available");
   return Object.fromEntries(Array.from(panel.querySelectorAll("dt")).map(label => [label.textContent, label.nextElementSibling?.textContent]));
+}
+
+function recoveredCopies(): Record<string, string>[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('section[aria-label="Unsaved draft recovery"]')).map(panel => recoveredFields(panel));
+}
+
+async function discardRecoveredCopy(index: number): Promise<void> {
+  const panel = container.querySelectorAll('section[aria-label="Unsaved draft recovery"]')[index];
+  assert.ok(panel);
+  const discard = panel.querySelector("button");
+  assert.ok(discard);
+  assert.equal(discard.textContent, "Discard recovered draft");
+  await act(async () => { Simulate.click(discard); });
 }
 
 for (const [profile, transition] of [["qm", "Closed"], ["owner", "Closed"], ["owner", "reassigned"]] as const) {
@@ -1445,4 +1457,207 @@ test("accepted hold fields do not leave a recovery draft", async () => {
   await click("Add update");
   await click("Reload saved issue");
   assert.equal(recoveryPanel(), null);
+});
+
+test("reopened recovery stays visible through initialization, audit writes and matching fresh submissions", async () => {
+  let stored = issue({ transformedInto: "OFI", status: "Created" });
+  const patches: { patch: Partial<IIssue>; eTag: string }[] = [];
+  const entries: IProgressLogEntry[] = [];
+  const auditText = "Issue re-opened — corrective-action cycle restarted. Previous close: —.";
+  let failNextSave = false;
+  await renderApp({
+    getIssue: async () => stored,
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      patches.push({ patch, eTag });
+      if (failNextSave) { failNextSave = false; throw new IssueConflictError(stored.id, stored); }
+      stored = { ...stored, ...patch, eTag: `"${patches.length + 2}"` };
+      return stored;
+    },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      const accepted = { ...entry, id: entries.length + 1, saveWarning: "Your update was posted. Reload its server details." };
+      entries.push(accepted);
+      stored = { ...stored, progressLog: [...entries] };
+      return accepted;
+    },
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Accepted observation");
+  await click("Add update");
+  change("Status", "In Progress");
+  change("Follow up (Quality Team notes)", "Recovered assessment");
+  writeProgress(auditText);
+  stored = { ...stored, status: "Closed", eTag: '"2"' };
+  await click("Reload saved issue");
+  const recovered = { Status: "In Progress", "Quality Team notes": "Recovered assessment", "Unposted progress note": auditText };
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  assert.equal(patches.length, 0);
+  await click("Re-open issue");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  assert.equal(field("Follow up (Quality Team notes)").value, "");
+  assert.equal(progressInput().value, "");
+  assert.equal(entries[1].text, auditText);
+  assert.equal(patches[0].patch.followUp, undefined);
+  assert.equal(patches[0].eTag, '"2"');
+  change("Follow up (Quality Team notes)", "Recovered assessment");
+  writeProgress(auditText);
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  await click("Save changes");
+  assert.equal(patches[1].eTag, '"3"');
+  assert.equal(progressInput().value, auditText);
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  await click("Add update");
+  assert.equal(progressInput().value, "");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  failNextSave = true;
+  change("Follow up (Quality Team notes)", "A conflicting fresh assessment");
+  writeProgress("Keep the live progress draft");
+  await click("Save changes");
+  await click("Reload latest and discard draft");
+  assert.equal(field("Follow up (Quality Team notes)").value, "Recovered assessment");
+  assert.equal(progressInput().value, "Keep the live progress draft");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  const content = recoveryPanel()?.querySelector("dl");
+  assert.ok(content);
+  assert.equal(window.getComputedStyle(content).userSelect, "text");
+  change("Follow up (Quality Team notes)", "Keep the live detail draft");
+  await discardRecoveredCopy(0);
+  assert.equal(recoveryPanel(), null);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Keep the live detail draft");
+  assert.equal(progressInput().value, "Keep the live progress draft");
+  assert.equal(button("Save changes").disabled, false);
+  assert.equal(button("Add update").disabled, false);
+  assert.equal(patches.length, 3);
+  assert.equal(entries.length, 3);
+});
+
+for (const identical of [false, true]) {
+  test(`repeated close and reopen retains ${identical ? "identical" : "distinct"} recovery copies and discards only the selected copy`, async () => {
+    let stored = issue({ transformedInto: "OFI" });
+    let writes = 0;
+    let appends = 0;
+    await renderApp({
+      getIssue: async () => stored,
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        assert.equal(eTag, stored.eTag);
+        writes += 1;
+        stored = { ...stored, ...patch, eTag: `"write-${writes}"` };
+        return stored;
+      },
+      addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+        const accepted = { ...entry, id: ++appends, saveWarning: "Your update was posted. Reload its server details." };
+        stored = { ...stored, progressLog: [...stored.progressLog, accepted] };
+        return accepted;
+      },
+    }, [stored]);
+    await click("Issue register");
+    await openIssue();
+    writeProgress("Accepted observation");
+    await click("Add update");
+    const copies: Record<string, string>[] = [];
+    for (let round = 0; round < 2; round++) {
+      const suffix = identical ? "same" : String(round + 1);
+      change("Follow up (Quality Team notes)", `Assessment ${suffix}`);
+      writeProgress(`Evidence ${suffix}`);
+      stored = { ...stored, status: "Closed", eTag: `"close-${round}"` };
+      await click("Reload saved issue");
+      copies.push({ "Quality Team notes": `Assessment ${suffix}`, "Unposted progress note": `Evidence ${suffix}` });
+      assert.deepEqual(recoveredCopies(), copies);
+      await click("Back to register");
+      await openIssue();
+      assert.deepEqual(recoveredCopies(), copies);
+      await click("Re-open issue");
+      assert.deepEqual(recoveredCopies(), copies);
+      assert.equal(field("Follow up (Quality Team notes)").value, "");
+      assert.equal(progressInput().value, "");
+    }
+    assert.equal(writes, 2);
+    assert.equal(appends, 3);
+    change("Follow up (Quality Team notes)", "Fresh live assessment");
+    writeProgress("Fresh live evidence");
+    await discardRecoveredCopy(0);
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Fresh live assessment");
+    assert.equal(progressInput().value, "Fresh live evidence");
+    await click("Save changes");
+    await click("Add update");
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    stored = { ...stored, status: "Closed", eTag: '"final-close"' };
+    await click("Reload saved issue");
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    await discardRecoveredCopy(0);
+    assert.equal(recoveryPanel(), null);
+    assert.equal(writes, 3);
+    assert.equal(appends, 4);
+  });
+}
+
+test("owner recovery survives reassignment away and back, matching fresh writes, and another reassignment", async () => {
+  let stored = issue({ status: "Created" });
+  const identity = { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" };
+  let writes = 0;
+  let appends = 0;
+  const services = {
+    getIssue: async () => stored,
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      assert.equal(eTag, stored.eTag);
+      writes += 1;
+      stored = { ...stored, ...patch, eTag: `"write-${writes}"` };
+      return stored;
+    },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      const accepted = { ...entry, id: ++appends, saveWarning: "Your update was posted. Reload its server details." };
+      stored = { ...stored, progressLog: [...stored.progressLog, accepted] };
+      return accepted;
+    },
+  };
+  await renderApp(services, [stored], identity);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Accepted observation");
+  await click("Add update");
+  const date = addCalendarDays(todayDate(), -3);
+  change("Status", "In Progress");
+  change("Implementation date", date);
+  writeProgress("Owner evidence");
+  stored = { ...stored, taskOwnerEmail: "replacement@example.com", eTag: '"away-1"' };
+  await click("Reload saved issue");
+  const first = { Status: "In Progress", "Implementation date": date, "Unposted progress note": "Owner evidence" };
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(container.querySelector("textarea"), null);
+  stored = { ...stored, taskOwnerEmail: "owner@example.com", eTag: '"back-1"' };
+  await renderApp(services, [stored], identity);
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(field("Status").value, "Created");
+  assert.equal(progressInput().value, "");
+  change("Status", "In Progress");
+  change("Implementation date", date);
+  writeProgress("Owner evidence");
+  await click("Save progress");
+  await click("Add update");
+  assert.deepEqual(recoveredCopies(), [first]);
+  change("Status", "Created");
+  writeProgress("Second owner draft");
+  stored = { ...stored, taskOwnerEmail: "replacement@example.com", eTag: '"away-2"' };
+  await click("Reload saved issue");
+  const second = { Status: "Created", "Unposted progress note": "Second owner draft" };
+  assert.deepEqual(recoveredCopies(), [first, second]);
+  stored = { ...stored, taskOwnerEmail: "owner@example.com", eTag: '"back-2"' };
+  await renderApp(services, [stored], identity);
+  assert.deepEqual(recoveredCopies(), [first, second]);
+  assert.equal(field("Status").value, "In Progress");
+  const nextDate = addCalendarDays(todayDate(), -1);
+  change("Implementation date", nextDate);
+  writeProgress("Fresh owner draft");
+  await discardRecoveredCopy(1);
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(field("Implementation date").value, nextDate);
+  assert.equal(progressInput().value, "Fresh owner draft");
+  await discardRecoveredCopy(0);
+  assert.equal(recoveryPanel(), null);
+  await click("Save progress");
+  await click("Add update");
+  assert.equal(recoveryPanel(), null);
+  assert.equal(writes, 2);
+  assert.equal(appends, 3);
 });

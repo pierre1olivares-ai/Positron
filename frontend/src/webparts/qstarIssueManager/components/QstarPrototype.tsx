@@ -1107,12 +1107,19 @@ function replaceDraftPart(drafts, id, part, value) {
   return next;
 }
 
-function DraftRecovery({ draft, onDiscard }) {
+function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
+  return profile === "reader" || issue.status === "Closed" || (profile === "owner" && !(
+    issue.taskOwnerEmail ? issue.taskOwnerEmail.toLowerCase() === userEmail.toLowerCase() :
+    issue.taskOwner === userDisplayName
+  ));
+}
+
+function DraftRecovery({ draft, number, onDiscard }) {
   const fields = { ...draft.detail, ...draft.hold };
   return (
     <section aria-label="Unsaved draft recovery" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
-      <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery</h3>
-      <p className="mt-1 text-sm text-amber-900">This issue is now read-only. These unsaved details are kept for this session so you can select and copy them. They have not been submitted.</p>
+      <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery · {number}</h3>
+      <p className="mt-1 text-sm text-amber-900">This copy was kept when the issue became read-only. It stays available for this session while you make new edits. Select and copy what you need, then discard it when no longer needed.</p>
       <dl className="mt-3 space-y-2 text-sm" style={{ userSelect: "text" }}>
         {Object.keys(fields).map((key) => <div key={key}><dt className="font-semibold">{DRAFT_FIELD_LABELS[key]}</dt><dd className="whitespace-pre-wrap">{fields[key] || "(Cleared)"}</dd></div>)}
         {draft.progress && <div><dt className="font-semibold">Unposted progress note</dt><dd className="whitespace-pre-wrap">{draft.progress}</dd></div>}
@@ -1876,7 +1883,7 @@ export default function App({
   const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
   const pendingOperations = useRef(new Map());
   const [busyIssueIds, setBusyIssueIds] = useState([]);
-  const [issueDrafts, setIssueDrafts] = useState({});
+  const [drafts, setDrafts] = useState({ active: {}, archives: {}, nextArchiveId: 1 });
   const [openId, setOpenId] = useState(null);
   const [regFilter, setRegFilter] = useState({ q: "", statuses: [], type: "", bu: "", overdueOnly: false });
 
@@ -1900,22 +1907,44 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
-  const recordDraft = (id, part, value) => setIssueDrafts((drafts) => replaceDraftPart(drafts, id, part, value));
-  const clearSubmittedDetail = (id, patch) => setIssueDrafts((drafts) => {
-    if (!drafts[id]) return drafts;
-    let next = drafts;
+  useEffect(() => {
+    if (!issues) return;
+    setDrafts((currentDrafts) => {
+      const readOnly = issues.filter((issue) => currentDrafts.active[issue.id] && issueIsReadOnly(issue, profile, userEmail, userDisplayName));
+      if (!readOnly.length) return currentDrafts;
+      const active = { ...currentDrafts.active };
+      const archives = { ...currentDrafts.archives };
+      let nextArchiveId = currentDrafts.nextArchiveId;
+      for (const issue of readOnly) {
+        archives[issue.id] = [...(archives[issue.id] || []), { id: nextArchiveId++, draft: active[issue.id] }];
+        delete active[issue.id];
+      }
+      return { active, archives, nextArchiveId };
+    });
+  }, [issues, profile, userEmail, userDisplayName, drafts.active]);
+
+  const recordDraft = (id, part, value) => setDrafts((currentDrafts) => ({
+    ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, part, value),
+  }));
+  const clearSubmittedDetail = (id, patch) => setDrafts((currentDrafts) => {
+    if (!currentDrafts.active[id]) return currentDrafts;
+    let active = currentDrafts.active;
     for (const part of ["detail", "hold"]) {
-      const fields = { ...drafts[id][part] };
+      const fields = { ...currentDrafts.active[id][part] };
       for (const key of Object.keys(fields)) {
         const value = part === "hold" && key === "holdReason" ? fields[key].trim() : fields[key];
         if (value === patch[key]) delete fields[key];
       }
-      next = replaceDraftPart(next, id, part, fields);
+      active = replaceDraftPart(active, id, part, fields);
     }
-    return next;
+    return { ...currentDrafts, active };
   });
-  const discardDetail = (id) => setIssueDrafts((drafts) =>
-    replaceDraftPart(replaceDraftPart(drafts, id, "detail", {}), id, "hold", {}));
+  const discardDetail = (id) => setDrafts((currentDrafts) => ({
+    ...currentDrafts, active: replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", {}), id, "hold", {}),
+  }));
+  const discardArchive = (id, archiveId) => setDrafts((currentDrafts) => ({
+    ...currentDrafts, archives: { ...currentDrafts.archives, [id]: currentDrafts.archives[id].filter((archive) => archive.id !== archiveId) },
+  }));
   const closeIssue = (id) => setOpenId((activeId) => activeId === id ? null : activeId);
 
   const runIssueOperation = (id, operation) => {
@@ -1977,8 +2006,8 @@ export default function App({
     setSaveError("");
     try {
       const saved = await dataService.addProgressLogEntry(id, signedEntry);
-      setIssueDrafts((drafts) => drafts[id]?.progress?.trim() === entry.text
-        ? replaceDraftPart(drafts, id, "progress", "") : drafts);
+      setDrafts((currentDrafts) => currentDrafts.active[id]?.progress?.trim() === entry.text
+        ? { ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, "progress", "") } : currentDrafts);
       setIssues((items) => items.map((item) => item.id === id
         ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
       if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
@@ -2118,11 +2147,7 @@ export default function App({
   };
 
   const back = () => closeIssue(current.id);
-  const ownsCurrent = current && (
-    current.taskOwnerEmail ? current.taskOwnerEmail.toLowerCase() === userEmail.toLowerCase() :
-    current.taskOwner === userDisplayName
-  );
-  const readOnlyCurrent = current && (profile === "reader" || current.status === "Closed" || (profile === "owner" && !ownsCurrent));
+  const readOnlyCurrent = current && issueIsReadOnly(current, profile, userEmail, userDisplayName);
   let body;
   if (current) {
     const isClosed = current.status === "Closed";
@@ -2130,7 +2155,7 @@ export default function App({
     if (profile === "reader") {
       body = <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (profile === "owner") {
-      body = (!isClosed && ownsCurrent)
+      body = !readOnlyCurrent
         ? <OwnerIssueDetail issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
         : <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (isClosed) {
@@ -2202,11 +2227,7 @@ export default function App({
             {(!current || current.id !== saveWarning.issueId || current.eTag || current.status === "Closed") && <button disabled={reloadingSaved} className="ml-2 underline" onClick={reloadSavedIssue}>{reloadingSaved ? "Reloading…" : "Reload saved issue"}</button>}
           </div>}
           {activeTab === "report" && !current && <div className="mb-4 text-sm text-slate-500">Submit a potential quality issue. It enters the Quality Team's triage queue for assessment.</div>}
-          {readOnlyCurrent && issueDrafts[current.id] && <DraftRecovery draft={issueDrafts[current.id]} onDiscard={() => setIssueDrafts((drafts) => {
-            const next = { ...drafts };
-            delete next[current.id];
-            return next;
-          })} />}
+          {current && (drafts.archives[current.id] || []).map((archive, index) => <DraftRecovery key={archive.id} number={index + 1} draft={archive.draft} onDiscard={() => discardArchive(current.id, archive.id)} />)}
           {body}
         </main>
 
