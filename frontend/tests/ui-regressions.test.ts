@@ -600,7 +600,8 @@ test("accepted reopening offers reload from the closed detail without resubmitti
   await openIssue();
   await click("Re-open issue");
   assertSavedWarning();
-  await click("Re-open issue");
+  assert.equal(button("Re-open issue").disabled, true);
+  act(() => { button("Re-open issue").click(); });
   assert.equal(writes, 1);
   await click("Reload saved issue");
   assert.equal(container.querySelector('[role="status"]'), null);
@@ -1322,37 +1323,137 @@ for (const [profile, transition] of [["qm", "Closed"], ["owner", "Closed"], ["ow
   });
 }
 
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    for (const readbackFails of [false, true]) {
+      test(`${transformedInto} ${action} acceptance ${readbackFails ? "with failed readback" : "with readback"} immediately closes the App view and recovers only unsubmitted progress`, async () => {
+        let stored = issue({
+          transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+          implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+        });
+        const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+        let reads = 0;
+        let appends = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes.push({ patch, eTag });
+            stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+            if (readbackFails && writes.length === 1) throw new IssueRefreshError(stored.id);
+            return stored;
+          },
+          getIssue: async () => {
+            reads += 1;
+            if (reads === 1) throw new Error("Read still unavailable");
+            return stored;
+          },
+          addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return { ...entry, id: appends }; },
+        }, [stored]);
+        await click("Issue register");
+        await openIssue();
+        change("Follow up (Quality Team notes)", "Submitted assessment");
+        writeProgress("Unsubmitted progress to recover");
+        if (action === "Save changes") change("Status", "Closed");
+        await click(action);
+        assert.equal(stored.status, "Closed");
+        assert.match(container.textContent || "", /Closed · read-only/);
+        assert.equal(container.querySelector("textarea"), null);
+        assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+        assert.doesNotMatch(recoveryPanel()?.textContent || "", /Submitted assessment/);
+        assert.match(container.textContent || "", /Submitted assessment/);
+        assert.ok(Array.from(container.querySelectorAll("dt")).some(element => element.textContent === "Closed on"));
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].eTag, '"1"');
+        assert.equal(appends, 0);
+        if (readbackFails) {
+          assertSavedWarning();
+          assert.equal(button("Re-open issue").disabled, true);
+          act(() => { button("Re-open issue").click(); });
+          await click("Back to register");
+          await openIssue();
+          assert.match(container.textContent || "", /Closed · read-only/);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, true);
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+          await click("Reload saved issue");
+          assertSavedWarning();
+          assert.match(container.querySelector('[role="status"]')?.textContent || "", /Read still unavailable/);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, true);
+          assert.equal(writes.length, 1);
+          assert.equal(appends, 0);
+          await click("Reload saved issue");
+          assert.equal(reads, 2);
+          assert.equal(container.querySelector('[role="status"]'), null);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, false);
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+          await click("Re-open issue");
+          assert.equal(writes.length, 2);
+          assert.equal(writes[1].eTag, '"2"');
+          assert.equal(writes[1].patch.status, "In Progress");
+          assert.equal(appends, 1);
+          assert.equal(field("Status").value, "In Progress");
+          assert.equal(progressInput().disabled, false);
+          assert.equal(progressInput().value, "");
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+        }
+      });
+    }
+  }
+}
+
 for (const action of ["Verify & close", "Save changes"]) {
   for (const readbackFails of [false, true]) {
-    test(`${action} acceptance ${readbackFails ? "with failed readback" : "with readback"} recovers only the unsubmitted progress part`, async () => {
+    test(`${action} ${readbackFails ? "accepted readback failure" : "accepted closure"} across remount blocks an already queued append`, async () => {
       let stored = issue({ transformedInto: "OFI" });
+      const readback = deferred<void>();
       let writes = 0;
+      let appends = 0;
       await renderApp({
-        updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
           writes += 1;
+          assert.equal(eTag, '"1"');
           stored = { ...stored, ...patch, eTag: '"2"' };
-          if (readbackFails) throw new IssueRefreshError(stored.id);
+          await readback.promise;
           return stored;
         },
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return entry; },
         getIssue: async () => stored,
       }, [stored]);
       await click("Issue register");
       await openIssue();
-      change("Follow up (Quality Team notes)", "Submitted assessment");
-      writeProgress("Unsubmitted progress to recover");
+      change("Follow up (Quality Team notes)", "Accepted before remount");
+      writeProgress("Queued progress must remain recoverable");
       if (action === "Save changes") change("Status", "Closed");
-      await click(action);
+      await act(async () => { Simulate.click(button(action)); Simulate.click(button("Add update")); });
+      assert.equal(writes, 1);
+      assert.equal(appends, 0);
+      await click("Back to register");
+      await openIssue();
+      assertFieldsDisabled(true);
+      assert.equal(progressInput().disabled, true);
+      await act(async () => {
+        if (readbackFails) readback.reject(new IssueRefreshError(stored.id));
+        else readback.resolve();
+      });
+      assert.equal(appends, 0);
+      assert.equal(writes, 1);
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(container.querySelector('[role="alert"]'), null);
+      assert.deepEqual(journalText(), []);
+      assert.deepEqual(recoveredFields(), { "Unposted progress note": "Queued progress must remain recoverable" });
       if (readbackFails) {
         assertSavedWarning();
-        await click("Back to register");
+        assert.equal(button("Re-open issue").disabled, true);
         await click("Reload saved issue");
-        await openIssue();
       }
-      assert.equal(stored.status, "Closed");
-      assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
-      assert.doesNotMatch(recoveryPanel()?.textContent || "", /Submitted assessment/);
+      await click("Back to register");
+      await openIssue();
+      assert.equal(button("Re-open issue").disabled, false);
       assert.equal(container.querySelector("textarea"), null);
-      assert.equal(writes, 1);
+      assert.deepEqual(recoveredFields(), { "Unposted progress note": "Queued progress must remain recoverable" });
+      assert.equal(appends, 0);
     });
   }
 }

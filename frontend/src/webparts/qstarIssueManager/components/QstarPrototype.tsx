@@ -1293,7 +1293,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -1631,7 +1631,7 @@ function ReadOnlyIssueDetail({ issue, onBack, onReopen, issueBusy = false }) {
               <RefreshCw size={16} className="mt-0.5 shrink-0" />
               <span><strong>This issue is closed.</strong> The full record and history below are read-only. Re-opening restarts the corrective-action cycle — status returns to In Progress and effectiveness must be verified again before it can be closed.</span>
             </div>
-            <Btn variant="primary" disabled={issueBusy} onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
+            <Btn variant="primary" disabled={issueBusy || !issue.eTag} onClick={onReopen}><RefreshCw size={15} />Re-open issue</Btn>
           </div>
         </Card>
       )}
@@ -1810,7 +1810,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               {issue.followUp && <ReadRow label="QM follow-up note" value={<span className="whitespace-pre-wrap">{issue.followUp}</span>} />}
             </dl>
           </Card>
-          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
         </div>
 
         <div className="lg:col-span-2">
@@ -1874,6 +1874,8 @@ export default function App({
   connection,
 }: IQstarPrototypeProps) {
   const [issues, setIssues] = useState(null);
+  const latestIssues = useRef(issues);
+  latestIssues.current = issues;
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loadError, setLoadError] = useState("");
   const [saveError, setSaveError] = useState("");
@@ -1981,7 +1983,7 @@ export default function App({
       throw new Error("Wait for this issue's pending work to finish before closing. Try closing again once it finishes.");
     }
     return runIssueOperation(id, async () => {
-      const previous = issues.find((issue) => issue.id === id);
+      const previous = latestIssues.current?.find((issue) => issue.id === id);
       if (!previous) throw new Error("Issue is no longer available. Reload the register.");
       if (!previous.eTag) throw new Error("Reload this issue before saving so its current version can be checked.");
       const normalized = buildIssueTransition(previous, patch);
@@ -1993,7 +1995,8 @@ export default function App({
       } catch (error) {
         if (error instanceof IssueRefreshError) {
           clearSubmittedDetail(id, patch);
-          setIssues((items) => items.map((item) => item.id === id ? { ...item, eTag: undefined } : item));
+          setIssues((items) => items.map((item) => item.id === id
+            ? { ...item, ...(normalized.status === "Closed" ? normalized : {}), eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
         } else setSaveError(error instanceof Error ? error.message : String(error));
         throw error;
@@ -2002,6 +2005,10 @@ export default function App({
   };
 
   const addProgress = (id, entry) => runIssueOperation(id, async () => {
+    const current = latestIssues.current?.find((issue) => issue.id === id);
+    if (!current) throw new Error("Issue is no longer available. Reload the register.");
+    if (!current.eTag) throw new Error("Reload this issue before posting progress so its current state can be checked.");
+    if (issueIsReadOnly(current, profile, userEmail, userDisplayName)) throw new Error("This issue is read-only. Reload it before posting progress.");
     const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
     setSaveError("");
     try {
