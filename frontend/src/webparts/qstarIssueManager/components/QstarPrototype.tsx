@@ -1,9 +1,14 @@
 /* eslint-disable */
 // @ts-nocheck
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import type { IDataService } from "../services/IDataService";
 import type { Role } from "../models/IRole";
 import type { ICheckResult } from "../services/ConnectionDiagnosticsService";
+import { REGIONS, normalizeRegion } from "../domain/referenceData";
+import { formatLocalDate, normalizeDateOnly, addCalendarDays, addCalendarMonths, calendarDaysBetween, sameCalendarDay, isDateInYearThroughToday } from "../domain/calendarDates";
+import { buildIssueTransition, reopenIssuePatch } from "../domain/issueLifecycle";
+import { changedIssueFields } from "../domain/issueDraft";
+import { IssueConflictError, IssueRefreshError } from "../services/issueErrors";
 import "./QstarPrototype.scss";
 import {
   LayoutDashboard, Inbox, ClipboardList, BellRing, ListChecks, Send,
@@ -35,7 +40,6 @@ const statusOptionsFor = (i) => i && isNC(i) ? ["Created", "In Progress", NC_TES
 const TRANSFORM_TYPES = ["OFI", "NC Minor", "NC Major", "Only sent to Dept/BU for Action"];
 const DEVIATION_TYPES = ["Communication", "Compliance", "Documentation", "Equipment", "Process", "Quality", "Safety", "System"];
 const ORIGINS = ["Customer Complaints or Claims", "Internal Finding"];
-const REGIONS = ["Germany", "Americas", "Asia Pacific", "China", "Eastern Europe", "Head Office", "Western Europe"];
 const YESNO = ["Yes", "No"];
 const BUSINESS_UNITS = [
   "BU Aftermarket", "BU Airlines", "BU Automotive", "BU Diplo & High Security",
@@ -50,11 +54,11 @@ const OWNERS = ["A. Keller", "M. Dubois", "S. Tanaka", "L. Rossi", "P. Nguyen", 
 /* ---------- Date helpers ---------- */
 const DAY = 86400000;
 const today = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
-const iso = (d) => new Date(d).toISOString().slice(0, 10);
-const addDays = (d, n) => iso(new Date(new Date(d).getTime() + n * DAY));
-const addMonths = (d, n) => { const x = new Date(d); x.setMonth(x.getMonth() + n); return iso(x); };
-const daysBetween = (a, b) => Math.round((new Date(b).setHours(0, 0, 0, 0) - new Date(a).setHours(0, 0, 0, 0)) / DAY);
-const fmtDate = (d) => d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+const iso = (d) => d instanceof Date ? formatLocalDate(d) : normalizeDateOnly(d);
+const addDays = addCalendarDays;
+const addMonths = addCalendarMonths;
+const daysBetween = calendarDaysBetween;
+const fmtDate = (d) => d ? new Date(`${normalizeDateOnly(d)}T12:00:00`).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 const fmtDateTime = (d) => new Date(d).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
 /* ---------- Derived state helpers ---------- */
@@ -338,7 +342,7 @@ function seed() {
       closedDate: addDays(rd, 44), closedAt: `${addDays(rd, 44)}T${String(8 + (k % 9)).padStart(2, "0")}:${String((k * 7) % 60).padStart(2, "0")}:00`,
     }));
   }
-  return base;
+  return base.map((issue) => ({ ...issue, region: normalizeRegion(issue.region) }));
 }
 
 /* ---------- Reminder engine (simulated) ---------- */
@@ -518,7 +522,7 @@ function ChartNote({ children }) {
   return <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-400">{children}</p>;
 }
 
-function Dashboard({ issues: allIssues }) {
+export function Dashboard({ issues: allIssues }) {
   const [cumCat, setCumCat] = useState("All");
   const [cumStatus, setCumStatus] = useState("All");
   const [cumGran, setCumGran] = useState("Month");
@@ -535,7 +539,7 @@ function Dashboard({ issues: allIssues }) {
   const nowD = today();
   const curYear = nowD.getFullYear();
   const yearStart = new Date(curYear, 0, 1);
-  const inYear = (d) => { const x = new Date(d); return x >= yearStart && x <= nowD; };
+  const inYear = (d) => isDateInYearThroughToday(d, nowD);
   const createdY = created.filter((i) => inYear(i.reportDate));
   const ytdRange = `Data calculated from ${fmtDate(yearStart)} to ${fmtDate(nowD)}.`;
   const cumFrom = created.length ? new Date(Math.min(...created.map((i) => +new Date(i.reportDate)))) : nowD;
@@ -929,8 +933,21 @@ function Register({ issues, onOpen, filter, setFilter }) {
 /* ============================================================
    Progress log (append-only, immutable)
    ============================================================ */
-function ProgressLog({ entries, canAdd, author, onAdd }) {
+export function ProgressLog({ entries, canAdd, author, onAdd }) {
   const [text, setText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async () => {
+    if (saving || !text.trim()) return;
+    setSaving(true);
+    setError("");
+    try {
+      await onAdd({ ts: new Date().toISOString(), author, text: text.trim() });
+      setText("");
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+    } finally { setSaving(false); }
+  };
   const sorted = [...(entries || [])].sort((a, b) => new Date(b.ts) - new Date(a.ts));
   return (
     <div>
@@ -940,8 +957,9 @@ function ProgressLog({ entries, canAdd, author, onAdd }) {
           <TextArea value={text} onChange={(e) => setText(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
-            <Btn disabled={!text.trim()} onClick={() => { onAdd({ ts: new Date().toISOString(), author, text: text.trim() }); setText(""); }}><Plus size={15} />Add update</Btn>
+            <Btn disabled={!text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
           </div>
+          {error && <p role="alert" className="mt-2 text-sm text-rose-700">{error}</p>}
         </div>
       )}
       {sorted.length === 0 ? (
@@ -1081,46 +1099,56 @@ function NCTestBanner({ i }) {
 /* ============================================================
    QM Issue detail (full edit)
    ============================================================ */
-function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onAcknowledge }) {
+export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author }) {
   const [d, setD] = useState(issue);
+  const [baseline, setBaseline] = useState(issue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const [holdOpen, setHoldOpen] = useState(false);
   const [hadUpdate, setHadUpdate] = useState(issue.ownerUpdate); // header badge, snapshot per opened issue
-  useEffect(() => { setD(issue); setHadUpdate(issue.ownerUpdate); if (issue.ownerUpdate && onAcknowledge) onAcknowledge(issue.id); }, [issue.id]);
+  useEffect(() => { setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setError(""); setNeedsReload(!issue.eTag); }, [issue.id]);
   const set = (k, v) => setD((p) => ({ ...p, [k]: v }));
-  const dirty = JSON.stringify(d) !== JSON.stringify(issue);
+  const dirty = Object.keys(changedIssueFields(baseline, d)).length > 0;
   const nc = isNC(d);
   const testEnd = ncTestEnd(d);
   const inTest = inNCTest(d);
   const testLeft = ncTestDaysLeft(d);
   const testDone = ncTestComplete(d);
 
-  const save = (extra = {}) => {
-    const next = { ...d, ...extra };
-    if (next.taskOwner && !next.taskOwnerEmail) {
-      alert("Enter the task owner's Microsoft 365 email so SharePoint can resolve the person and apply assignment permissions.");
-      return;
-    }
-    if (next.verifiedBy && !next.verifiedByEmail) {
-      alert("Enter the verifier's Microsoft 365 email so SharePoint can resolve the person.");
-      return;
-    }
-    onUpdate(issue.id, next);
+  const acceptSaved = (saved) => { setD(saved); setBaseline(saved); setHadUpdate(saved.ownerUpdate); };
+  const save = async (extra = {}) => {
+    if (saving || needsReload) return false;
+    setSaving(true);
+    setError("");
+    try {
+      const next = { ...d, ...extra };
+      if (next.taskOwner && !next.taskOwnerEmail) throw new Error("Enter the task owner's Microsoft 365 email.");
+      if (next.verifiedBy && !next.verifiedByEmail && !next.verifiedById) throw new Error("Enter the verifier's Microsoft 365 email.");
+      const patch = buildIssueTransition(baseline, changedIssueFields(baseline, next));
+      acceptSaved(await onUpdate(issue.id, patch, baseline.eTag));
+      return true;
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
+      return false;
+    } finally { setSaving(false); }
   };
-  const putOnHold = (holdReason, holdUntil) => { setD((p) => ({ ...p, status: "On Hold", holdReason, holdUntil })); onUpdate(issue.id, { ...d, status: "On Hold", holdReason, holdUntil }); setHoldOpen(false); };
+  const putOnHold = async (holdReason, holdUntil) => { if (await save({ status: "On Hold", holdReason, holdUntil })) setHoldOpen(false); };
   const startTest = () => save({ implementationDate: d.implementationDate || iso(today()), status: NC_TEST });
-  const close = () => {
-    if (nc) {
-      if (!d.implementationDate) { alert(`This is an NC. Record the implementation date and run the ${NC_TEST_MONTHS}-month effectiveness test before closing.`); return; }
-      if (!inTest && !testDone) { alert(`Start the ${NC_TEST_MONTHS}-month effectiveness test first — an NC can't be closed without it.`); return; }
-      if (!testDone) { alert(`The effectiveness test ends ${fmtDate(testEnd)} (${testLeft} day(s) left). An NC can only be closed after the ${NC_TEST_MONTHS}-month test period.`); return; }
-    }
-    if (!d.verifiedBy) { alert("Record who verified effectiveness before closing (ISO 9001 §10.2)."); return; }
-    save({ status: "Closed", closedDate: iso(today()), closedAt: new Date().toISOString(), verifiedDate: d.verifiedDate || iso(today()) });
+  const close = () => save({ status: "Closed" });
+  const reload = async () => {
+    setSaving(true);
+    try { acceptSaved(await onReload(issue.id)); setNeedsReload(false); setError(""); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setSaving(false); }
   };
 
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to register</button>
+      {error && <div role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800">{error} Your draft has been kept.</div>}
+      {needsReload && <Btn disabled={saving} variant="ghost" onClick={reload}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1181,20 +1209,21 @@ function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onAcknowledge }
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog entries={d.progressLog} canAdd={false} /></Card>
+          <Card className="p-4"><ProgressLog entries={issue.progressLog} canAdd author={author} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
           <Card className="p-4">
             <SectionTitle icon={CheckCircle2}>Actions</SectionTitle>
             <div className="flex flex-col gap-2">
-              <Btn onClick={() => save()} disabled={!dirty}><CheckCircle2 size={15} />Save changes</Btn>
+              <Btn onClick={() => save()} disabled={!dirty || saving || needsReload}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save changes"}</Btn>
               {nc && !inTest && d.status !== "Closed" && (
-                <Btn variant="primary" onClick={startTest} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Start {NC_TEST_MONTHS}-month effectiveness test</Btn>
+                <Btn variant="primary" disabled={saving || needsReload} onClick={startTest} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Start {NC_TEST_MONTHS}-month effectiveness test</Btn>
               )}
-              <Btn variant="ghost" onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>
-              <Btn variant="primary" onClick={close} disabled={nc && !testDone} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
-              <Btn variant="danger" onClick={() => save({ status: "Rejected", taskCreated: "No" })}><XCircle size={15} />Reject issue</Btn>
+              <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>
+              <Btn variant="primary" onClick={close} disabled={saving || needsReload || (nc && !testDone)} style={{ background: nc && !testDone ? "#94a3b8" : "#059669" }} className="hover:opacity-90"><ShieldCheck size={15} />Verify &amp; close</Btn>
+              <Btn variant="danger" disabled={saving || needsReload} onClick={() => save({ status: "Rejected", taskCreated: "No" })}><XCircle size={15} />Reject issue</Btn>
+              {hadUpdate && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => save({ ownerUpdate: false })}>Acknowledge owner update</Btn>}
             </div>
             {nc && !testDone && d.status !== "Closed" && <p className="mt-2 text-xs text-cyan-700">{inTest ? `Closure unlocks when the test ends (${fmtDate(testEnd)}).` : "Closure unlocks after the effectiveness test completes."}</p>}
             {dirty && <p className="mt-2 text-xs text-amber-600">Unsaved changes.</p>}
@@ -1248,7 +1277,26 @@ function TriageQueue({ issues, onOpen }) {
   );
 }
 
-function TriageForm({ issue, onBack, onTriage }) {
+export function TriageForm({ issue, onBack, onTriage, onReload }) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [needsReload, setNeedsReload] = useState(!issue.eTag);
+  const baseline = useRef(issue);
+  const persist = async (patch) => {
+    if (saving || needsReload) return;
+    setSaving(true); setError("");
+    try { await onTriage(issue.id, patch, baseline.current.eTag); }
+    catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
+    } finally { setSaving(false); }
+  };
+  const reload = async () => {
+    setSaving(true);
+    try { await onReload(issue.id); onBack(); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setSaving(false); }
+  };
   const [transformedInto, setT] = useState("OFI");
   const [taskOwner, setOwner] = useState("");
   const [taskOwnerEmail, setOwnerEmail] = useState("");
@@ -1258,14 +1306,16 @@ function TriageForm({ issue, onBack, onTriage }) {
   const nc = transformedInto === "NC Minor" || transformedInto === "NC Major";
 
   const create = () => {
-    if (!taskOwner || !taskOwnerEmail) { alert("Assign a task owner and their Microsoft 365 email so permissions and reminders have a stable recipient."); return; }
-    onTriage(issue.id, { triaged: true, status: "Created", transformedInto, taskOwner, taskOwnerEmail, ownerBU, dueDate, followUp, taskCreated: transformedInto === "Only sent to Dept/BU for Action" ? "No" : "Yes" });
+    if (!taskOwner || !taskOwnerEmail) { setError("Assign a task owner and their Microsoft 365 email so permissions and reminders have a stable recipient."); return; }
+    persist({ triaged: true, status: "Created", transformedInto, taskOwner, taskOwnerEmail, ownerBU, dueDate, followUp, taskCreated: transformedInto === "Only sent to Dept/BU for Action" ? "No" : "Yes" });
   };
-  const reject = () => onTriage(issue.id, { triaged: true, status: "Rejected", taskCreated: "No", followUp: followUp || "Declined at triage — no quality action required." });
+  const reject = () => persist({ triaged: true, status: "Rejected", taskCreated: "No", followUp: followUp || "Declined at triage — no quality action required." });
 
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to triage queue</button>
+      {error && <p role="alert" className="text-sm text-rose-700">{error} Your draft has been kept.</p>}
+      {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and return to queue</Btn>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <div className="lg:col-span-3"><IntakeSummary i={issue} /></div>
         <div className="lg:col-span-2">
@@ -1280,8 +1330,8 @@ function TriageForm({ issue, onBack, onTriage }) {
               <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
               <Field label="Follow up note (optional)"><TextArea value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
               <div className="flex flex-col gap-2 pt-1">
-                <Btn onClick={create}><CheckCircle2 size={15} />Create issue</Btn>
-                <Btn variant="danger" onClick={reject}><XCircle size={15} />Reject (no action)</Btn>
+                <Btn onClick={create} disabled={saving || needsReload}><CheckCircle2 size={15} />Create issue</Btn>
+                <Btn variant="danger" onClick={reject} disabled={saving || needsReload}><XCircle size={15} />Reject (no action)</Btn>
               </div>
             </div>
           </Card>
@@ -1294,8 +1344,8 @@ function TriageForm({ issue, onBack, onTriage }) {
 /* ============================================================
    Reporter intake form (mirrors Q-Star)
    ============================================================ */
-function ReporterForm({ onSubmit, settings }) {
-  const blank = { shortSummary: "", description: "", immediateAction: "", severity: "", createdBy: "", departmentBU: "", region: "", alreadyInContact: "", deviationType: "", issueOrigin: "", additionalComments: "", attachments: [] };
+function ReporterForm({ onSubmit, settings, reporterName }) {
+  const blank = { shortSummary: "", description: "", immediateAction: "", severity: "", createdBy: reporterName, departmentBU: "", region: "", alreadyInContact: "", deviationType: "", issueOrigin: "", additionalComments: "", attachments: [] };
   const [f, setF] = useState(blank);
   const [done, setDone] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -1343,7 +1393,7 @@ function ReporterForm({ onSubmit, settings }) {
         <Field label="Immediate action taken"><TextArea value={f.immediateAction} onChange={(e) => set("immediateAction", e.target.value)} placeholder="Any containment already done?" /></Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Severity *"><Select value={f.severity} onChange={(e) => set("severity", e.target.value)} options={SEVERITIES} /></Field>
-          <Field label="Reported by *"><TextInput value={f.createdBy} onChange={(e) => set("createdBy", e.target.value)} placeholder="Your name" /></Field>
+          <Field label="Reported by" hint="Your signed-in Microsoft 365 identity"><TextInput value={reporterName} readOnly /></Field>
           <Field label="Department / Business Unit *"><Select value={f.departmentBU} onChange={(e) => set("departmentBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
           <Field label="Region *"><Select value={f.region} onChange={(e) => set("region", e.target.value)} options={REGIONS} /></Field>
           <Field label="Deviation type *"><Select value={f.deviationType} onChange={(e) => set("deviationType", e.target.value)} options={DEVIATION_TYPES} /></Field>
@@ -1351,7 +1401,7 @@ function ReporterForm({ onSubmit, settings }) {
           <Field label="Already in contact with the dept?"><Select value={f.alreadyInContact} onChange={(e) => set("alreadyInContact", e.target.value)} options={YESNO} /></Field>
         </div>
         <Field label="Additional comments (optional)"><TextArea value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
-        <Field label="Attachment" hint="File upload is wired to SharePoint in the production build."><div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-400"><Paperclip size={15} />Drag a file here (demo placeholder)</div></Field>
+        <Field label="Attachment" hint="Attachments are not supported by this form yet."><div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-400"><Paperclip size={15} />File upload unavailable</div></Field>
         {submitError && <p className="text-sm text-rose-700">Could not submit: {submitError}</p>}
         <div className="flex justify-end pt-1"><Btn onClick={submit} disabled={!valid || submitting}><Send size={15} />{submitting ? "Submitting…" : "Submit report"}</Btn></div>
         {!valid && <p className="text-right text-xs text-slate-400">Fields marked * are required.</p>}
@@ -1363,7 +1413,16 @@ function ReporterForm({ onSubmit, settings }) {
 /* ============================================================
    Admin · IT settings (connect MS Form + SharePoint)
    ============================================================ */
-function SettingsView({ settings, onSave, onRunDiagnostics }) {
+export function SettingsView({ settings, onSave, onRunDiagnostics, connection }) {
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const save = async () => {
+    if (saving) return;
+    setSaving(true); setSaveError("");
+    try { await onSave(s); }
+    catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
+    finally { setSaving(false); }
+  };
   const [s, setS] = useState(settings);
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ICheckResult[] | null>(null);
@@ -1418,10 +1477,13 @@ function SettingsView({ settings, onSave, onRunDiagnostics }) {
         <p className="mb-3 text-sm text-slate-600">
           The web part uses its configured site and Lists through the signed-in user's SharePoint session. No client secret or app registration is needed for same-site data.
         </p>
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="SharePoint site URL"><TextInput value={s.spSiteUrl || ""} onChange={(e) => set("spSiteUrl", e.target.value)} placeholder="Leave blank for this site" /></Field>
-          <Field label="Issues list name"><TextInput value={s.spListName || ""} onChange={(e) => set("spListName", e.target.value)} placeholder="Q-Star Issues" /></Field>
-        </div>
+        <dl className="divide-y divide-slate-100">
+          <ReadRow label="SharePoint site URL" value={connection?.siteUrl || "Local development"} />
+          <ReadRow label="Issues list" value={connection?.issuesListName || "Q-Star Issues"} />
+          <ReadRow label="Progress list" value={connection?.progressListName || "Q-Star Progress Log"} />
+          <ReadRow label="Access mode" value={connection?.betaAccessMode ? "Beta pilot" : "Production groups"} />
+        </dl>
+        <p className="mt-3 text-xs text-slate-500">To change the connection, edit the SharePoint page and open this web part's properties. Saving settings below changes only the Forms link and flow ID.</p>
       </Card>
 
       <Card className="p-5">
@@ -1442,7 +1504,8 @@ function SettingsView({ settings, onSave, onRunDiagnostics }) {
       </Card>
 
       <div className="flex items-center gap-2">
-        <Btn onClick={() => onSave(s)} disabled={!dirty}><CheckCircle2 size={15} />Save settings</Btn>
+        <Btn onClick={save} disabled={!dirty || saving}><CheckCircle2 size={15} />{saving ? "Saving…" : "Save settings"}</Btn>
+        {saveError && <p role="alert" className="text-sm text-rose-700">{saveError}</p>}
       </div>
     </div>
   );
@@ -1506,7 +1569,7 @@ function ReadOnlyIssueDetail({ issue, onBack, onReopen }) {
 function RemindersView({ issues }) {
   const reminders = useMemo(() => buildReminders(issues), [issues]);
   const todayStr = iso(today());
-  const dueToday = reminders.filter((r) => r.when === todayStr);
+  const dueToday = reminders.filter((r) => sameCalendarDay(r.when, todayStr));
   const sent = reminders.filter((r) => r.sent && r.when !== todayStr);
   const upcoming = reminders.filter((r) => !r.sent).sort((a, b) => new Date(a.when) - new Date(b.when));
   const urgencyCls = { info: "bg-blue-50 text-blue-700 ring-blue-200", warn: "bg-amber-50 text-amber-700 ring-amber-200", danger: "bg-rose-50 text-rose-700 ring-rose-200" };
@@ -1577,25 +1640,43 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress }) {
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload }) {
+  const [baseline, setBaseline] = useState(issue);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const [status, setStatus] = useState(issue.status);
   const [impl, setImpl] = useState(issue.implementationDate || "");
   const [holdOpen, setHoldOpen] = useState(false);
-  useEffect(() => { setStatus(issue.status); setImpl(issue.implementationDate || ""); }, [issue.id, issue.status]);
+  useEffect(() => { setBaseline(issue); setStatus(issue.status); setImpl(issue.implementationDate || ""); setNeedsReload(!issue.eTag); setError(""); }, [issue.id]);
+  const accept = (saved) => { setBaseline(saved); setStatus(saved.status); setImpl(saved.implementationDate || ""); };
+  const persist = async (patch) => {
+    if (saving || needsReload) return false;
+    setSaving(true); setError("");
+    try { accept(await onUpdate(issue.id, buildIssueTransition(baseline, patch), baseline.eTag)); return true; }
+    catch (failure) {
+      setError(failure instanceof Error ? failure.message : String(failure));
+      if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
+      return false;
+    } finally { setSaving(false); }
+  };
+  const reload = async () => {
+    setSaving(true);
+    try { accept(await onReload(issue.id)); setNeedsReload(false); setError(""); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    finally { setSaving(false); }
+  };
   const nc = isNC(issue);
   const inTest = inNCTest(issue);
   const ownerOpts = issue.status === "On Hold" ? ["On Hold", "Created", "In Progress"] : ["Created", "In Progress"];
-  const putOnHold = (holdReason, holdUntil) => { onUpdate(issue.id, { status: "On Hold", holdReason, holdUntil }); setHoldOpen(false); };
-
-  const implementMitigation = () => {
-    const date = impl || iso(today());
-    onAddProgress(issue.id, { ts: new Date().toISOString(), author: owner, text: `Mitigation implemented — starting the ${NC_TEST_MONTHS}-month effectiveness test.` });
-    onUpdate(issue.id, { status: NC_TEST, implementationDate: date });
-  };
+  const putOnHold = async (holdReason, holdUntil) => { if (await persist({ status: "On Hold", holdReason, holdUntil })) setHoldOpen(false); };
+  const implementMitigation = () => persist({ status: NC_TEST, implementationDate: impl || iso(today()) });
 
   return (
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to my tasks</button>
+      {error && <p role="alert" className="text-sm text-rose-700">{error} Your draft has been kept.</p>}
+      {needsReload && <Btn onClick={reload} disabled={saving}>Reload latest and discard draft</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1637,16 +1718,16 @@ function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress }) {
               <div className="space-y-3">
                 <Field label="Status"><Select value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
                 <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput type="date" value={impl} onChange={(e) => setImpl(e.target.value)} /></Field>
-                <Btn variant="ghost" onClick={() => onUpdate(issue.id, { status, implementationDate: impl })} disabled={status === issue.status && impl === (issue.implementationDate || "")}><CheckCircle2 size={15} />Save progress</Btn>
-                {issue.status !== "On Hold" && <Btn variant="ghost" onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
-                <Btn variant="primary" onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
+                <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
+                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
+                <Btn variant="primary" disabled={saving || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
                 <p className="text-xs text-slate-400">Marking the mitigation as implemented moves this NC into the {NC_TEST_MONTHS}-month effectiveness test. It can only be closed by the QM afterwards.</p>
               </div>
             ) : (
               <div className="space-y-3">
                 <Field label="Status"><Select value={status} onChange={(e) => setStatus(e.target.value)} options={ownerOpts} /></Field>
-                <Btn onClick={() => onUpdate(issue.id, { status, implementationDate: impl })} disabled={status === issue.status}><CheckCircle2 size={15} />Save</Btn>
-                {issue.status !== "On Hold" && <Btn variant="ghost" onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
+                <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={saving || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
+                {issue.status !== "On Hold" && <Btn variant="ghost" disabled={saving || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <p className="text-xs text-slate-400">Closing and effectiveness verification are done by the Quality Team. Add a progress note to let them know when you're ready.</p>
               </div>
             )}
@@ -1664,10 +1745,6 @@ function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress }) {
 const DEFAULT_SETTINGS = {
   msFormUrl: "",
   flowId: "",
-  spSiteUrl: "",
-  spListName: "Q-Star Issues",
-  connected: false,
-  lastTested: "",
   access: [],
 };
 
@@ -1678,6 +1755,7 @@ export interface IQstarPrototypeProps {
   userEmail: string;
   developmentMode: boolean;
   onRunDiagnostics: () => Promise<ICheckResult[]>;
+  connection?: { siteUrl: string; issuesListName: string; progressListName: string; betaAccessMode: boolean };
 }
 
 export default function App({
@@ -1687,13 +1765,15 @@ export default function App({
   userEmail,
   developmentMode,
   onRunDiagnostics,
+  connection,
 }: IQstarPrototypeProps) {
   const [issues, setIssues] = useState(null);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [loadError, setLoadError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
-  const [tab, setTab] = useState("dashboard");
+  const [tab, setTab] = useState(profile === "owner" ? "mytasks" : "dashboard");
+  const pendingWrites = useRef(new Set());
   const [openId, setOpenId] = useState(null);
   const [regFilter, setRegFilter] = useState({ q: "", statuses: [], type: "", bu: "", overdueOnly: false });
 
@@ -1702,9 +1782,11 @@ export default function App({
     setLoadError("");
     setIssues(null);
     Promise.all([dataService.loadIssues(), dataService.loadSettings()])
-      .then(([loadedIssues, loadedSettings]) => {
+      .then(async ([loadedIssues, loadedSettings]) => {
+        const initialIssues = !loadedIssues.length && developmentMode && dataService.initializeIssues
+          ? await dataService.initializeIssues(seed()) : loadedIssues;
         if (cancelled) return;
-        setIssues(loadedIssues.length || !developmentMode ? loadedIssues : seed());
+        setIssues(initialIssues);
         setSettings({ ...DEFAULT_SETTINGS, ...loadedSettings, access: [] });
       })
       .catch((error) => {
@@ -1715,51 +1797,46 @@ export default function App({
     return () => { cancelled = true; };
   }, [dataService, developmentMode, reloadToken]);
 
-  const updateIssue = async (id, patch) => {
-    const normalized = { ...patch };
+  const acceptIssue = (saved) => {
+    setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
+    if (saved.saveWarning) setSaveError(saved.saveWarning);
+    return saved;
+  };
+  const reloadIssue = async (id) => acceptIssue(await dataService.getIssue(id));
+  const updateIssue = async (id, patch, expectedETag) => {
+    if (pendingWrites.current.has(id)) throw new Error("A save is already in progress. Wait for it to finish.");
     const previous = issues.find((issue) => issue.id === id);
-    if (previous && normalized.taskOwner !== undefined && normalized.taskOwner !== previous.taskOwner) {
-      normalized.taskOwnerId = undefined;
-    }
-    if (previous && normalized.verifiedBy !== undefined && normalized.verifiedBy !== previous.verifiedBy) {
-      normalized.verifiedById = undefined;
-    }
+    if (!previous) throw new Error("Issue is no longer available. Reload the register.");
+    const normalized = buildIssueTransition(previous, patch);
+    pendingWrites.current.add(id);
     setSaveError("");
-    setIssues((currentIssues) => currentIssues.map((issue) => issue.id === id ? { ...issue, ...normalized } : issue));
     try {
-      await dataService.updateIssue(id, normalized);
+      return acceptIssue(await dataService.updateIssue(id, normalized, expectedETag || previous.eTag));
     } catch (error) {
-      if (previous) setIssues((currentIssues) => currentIssues.map((issue) => issue.id === id ? previous : issue));
       setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
-    }
+    } finally { pendingWrites.current.delete(id); }
   };
 
   const addProgress = async (id, entry) => {
     const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
     setSaveError("");
-    setIssues((currentIssues) => currentIssues.map((issue) =>
-      issue.id === id ? { ...issue, progressLog: [...(issue.progressLog || []), signedEntry] } : issue
-    ));
     try {
-      await dataService.addProgressLogEntry(id, signedEntry);
+      const saved = await dataService.addProgressLogEntry(id, signedEntry);
+      setIssues((items) => items.map((item) => item.id === id
+        ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
+      if (saved.saveWarning) setSaveError(saved.saveWarning);
+      return saved;
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
-      setReloadToken((value) => value + 1);
       throw error;
     }
   };
 
-  const ownerAddProgress = async (id, entry) => {
-    const notificationPatch = {
-      ownerUpdate: true,
-      ownerUpdateAt: entry.ts || new Date().toISOString(),
-      ownerUpdateText: entry.text || "Posted an update.",
-    };
-    await Promise.all([addProgress(id, entry), updateIssue(id, notificationPatch)]);
-  };
-
-  const ownerUpdateTask = (id, patch) => {
+  // Flow B consumes accepted journal rows directly; no second write can make
+  // an accepted comment appear failed and invite a duplicate submission.
+  const ownerAddProgress = addProgress;
+  const ownerUpdateTask = (id, patch, expectedETag) => {
     const current = issues.find((issue) => issue.id === id);
     const statusChanged = current && patch.status && patch.status !== current.status;
     const extra = statusChanged ? {
@@ -1767,17 +1844,17 @@ export default function App({
       ownerUpdateAt: new Date().toISOString(),
       ownerUpdateText: `Status changed from "${current.status}" to "${patch.status}".`,
     } : {};
-    void updateIssue(id, { ...patch, ...extra });
+    return updateIssue(id, { ...patch, ...extra }, expectedETag);
+  };
+  const triage = async (id, patch, expectedETag) => {
+    const saved = await updateIssue(id, patch, expectedETag);
+    setOpenId(null);
+    return saved;
   };
 
-  const clearOwnerUpdate = (id) => { void updateIssue(id, { ownerUpdate: false }); };
-  const triage = (id, patch) => { void updateIssue(id, patch); setOpenId(null); };
-
   const addIntake = async (form) => {
-    const qsNumber = issues.length ? Math.max(...issues.map((issue) => issue.qsNumber || 0)) + 1 : 1001;
     const created = await dataService.createIssue({
       ...form,
-      qsNumber,
       reportDate: iso(today()),
       createdBy: userDisplayName,
       createdByEmail: userEmail,
@@ -1805,25 +1882,26 @@ export default function App({
       additionalComments: form.additionalComments || "",
     });
     setIssues((currentIssues) => [...currentIssues, created]);
+    if (created.saveWarning) setSaveError(created.saveWarning);
     return created.qsNumber;
   };
 
   const saveSettings = async (next) => {
-    const productionSettings = { ...next, access: [] };
-    setSettings(productionSettings);
+    const productionSettings = { msFormUrl: next.msFormUrl, flowId: next.flowId, access: [] };
     setSaveError("");
     try {
       await dataService.saveSettings(productionSettings);
+      setSettings(productionSettings);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : String(error));
       throw error;
     }
   };
 
-  const resetDemo = () => {
-    if (developmentMode && confirm("Reset the in-memory demo data?")) {
-      setIssues(seed());
-      setOpenId(null);
+  const resetDemo = async () => {
+    if (developmentMode && dataService.initializeIssues && confirm("Reset the saved demo data?")) {
+      try { setIssues(await dataService.initializeIssues(seed(), true)); setOpenId(null); }
+      catch (error) { setSaveError(error instanceof Error ? error.message : String(error)); }
     }
   };
 
@@ -1865,32 +1943,25 @@ export default function App({
   const defaultTab = profile === "owner" ? "mytasks" : "dashboard";
   const activeTab = tabs.some((item) => item.id === tab) ? tab : defaultTab;
 
-  const reopen = (id) => {
+  const reopen = async (id) => {
     const issue = issues.find((candidate) => candidate.id === id);
     if (!issue) return;
-    const entry = {
-      ts: new Date().toISOString(),
-      author: userDisplayName,
-      authorEmail: userEmail,
-      text: `Issue re-opened — corrective-action cycle restarted. Previous close: ${issue.closedAt ? fmtDateTime(issue.closedAt) : fmtDate(issue.closedDate)}${issue.verifiedBy ? `, effectiveness verified by ${issue.verifiedBy}` : ""}.`,
-    };
-    void addProgress(id, entry);
-    void updateIssue(id, {
-      status: "In Progress",
-      closedDate: "",
-      closedAt: "",
-      verifiedBy: "",
-      verifiedById: 0,
-      verifiedByEmail: "",
-      verifiedDate: "",
-      implementationDate: "",
-      effectivenessCheck: "",
-    });
+    try {
+      await updateIssue(id, reopenIssuePatch(issue), issue.eTag);
+    } catch (error) { return; }
+    try {
+      await addProgress(id, {
+        ts: new Date().toISOString(), author: userDisplayName, authorEmail: userEmail,
+        text: `Issue re-opened — corrective-action cycle restarted. Previous close: ${issue.closedAt ? fmtDateTime(issue.closedAt) : fmtDate(issue.closedDate)}${issue.verifiedBy ? `, effectiveness verified by ${issue.verifiedBy}` : ""}.`,
+      });
+    } catch (error) {
+      setSaveError("Issue was re-opened, but its journal note could not be saved. Add the note from the progress log.");
+    }
   };
 
   const back = () => setOpenId(null);
   const ownsCurrent = current && (
-    (current.taskOwnerEmail && current.taskOwnerEmail.toLowerCase() === userEmail.toLowerCase()) ||
+    current.taskOwnerEmail ? current.taskOwnerEmail.toLowerCase() === userEmail.toLowerCase() :
     current.taskOwner === userDisplayName
   );
   let body;
@@ -1900,22 +1971,22 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (profile === "owner") {
       body = (!isClosed && ownsCurrent)
-        ? <OwnerIssueDetail issue={current} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onAddProgress={ownerAddProgress} />
+        ? <OwnerIssueDetail issue={current} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={reloadIssue} onAddProgress={ownerAddProgress} />
         : <ReadOnlyIssueDetail issue={current} onBack={back} />;
     } else if (isClosed) {
       body = <ReadOnlyIssueDetail issue={current} onBack={back} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail issue={current} onBack={back} onUpdate={(id, patch) => void updateIssue(id, patch)} onAddProgress={addProgress} onAcknowledge={clearOwnerUpdate} />
-        : <TriageForm issue={current} onBack={back} onTriage={triage} />;
+        ? <QMIssueDetail issue={current} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={reloadIssue} author={userDisplayName} />
+        : <TriageForm issue={current} onBack={back} onTriage={triage} onReload={reloadIssue} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;
   else if (activeTab === "register") body = <Register issues={issues} onOpen={setOpenId} filter={regFilter} setFilter={setRegFilter} />;
   else if (activeTab === "reminders") body = <RemindersView issues={issues} />;
-  else if (activeTab === "report") body = <ReporterForm onSubmit={addIntake} settings={settings} />;
+  else if (activeTab === "report") body = <ReporterForm onSubmit={addIntake} settings={settings} reporterName={userDisplayName} />;
   else if (activeTab === "mytasks") body = <OwnerTasks issues={issues} owner={owner} ownerEmailAddress={userEmail} onOpen={setOpenId} />;
-  else if (activeTab === "settings") body = <SettingsView settings={settings} onSave={saveSettings} onRunDiagnostics={onRunDiagnostics} />;
+  else if (activeTab === "settings") body = <SettingsView connection={connection} settings={settings} onSave={saveSettings} onRunDiagnostics={onRunDiagnostics} />;
 
   return (
     <div className="qstar-app">
