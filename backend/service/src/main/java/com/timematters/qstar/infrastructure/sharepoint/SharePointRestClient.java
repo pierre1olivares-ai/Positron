@@ -18,9 +18,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.ResponseExtractor;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriUtils;
@@ -199,7 +199,8 @@ public class SharePointRestClient {
                 HttpMethod.POST,
                 listPath(title) + "/items(" + positive(id) + ")",
                 typedFields(title, fields),
-                headers);
+                headers,
+                null);
     }
 
     public long appendInFolder(String title, String folderPath, String text) {
@@ -282,38 +283,56 @@ public class SharePointRestClient {
             Object body,
             HttpHeaders headers,
             boolean acceptedWrite) {
-        ResponseEntity<String> response = exchange(method, path, body, headers);
-        try {
-            JsonNode node = json.readTree(response.getBody());
-            if (node == null || !node.isObject())
-                throw new IllegalStateException("SharePoint returned an invalid response object.");
-            node = node.has("d") ? node.get("d") : node;
-            if (node == null || !node.isObject())
-                throw new IllegalStateException("SharePoint returned an invalid response object.");
-            String eTag = response.getHeaders().getETag();
-            if (eTag != null && node instanceof ObjectNode object) object.put("odata.etag", eTag);
-            return node;
-        } catch (Exception e) {
-            if (acceptedWrite) throw new AcceptedWriteException();
-            throw new IllegalStateException("SharePoint returned an unreadable response.", e);
-        }
+        return exchange(
+                method,
+                path,
+                body,
+                headers,
+                response -> {
+                    try {
+                        JsonNode node = json.readTree(response.getBody());
+                        if (node == null || !node.isObject())
+                            throw new IllegalStateException(
+                                    "SharePoint returned an invalid response object.");
+                        node = node.has("d") ? node.get("d") : node;
+                        if (node == null || !node.isObject())
+                            throw new IllegalStateException(
+                                    "SharePoint returned an invalid response object.");
+                        String eTag = response.getHeaders().getETag();
+                        if (eTag != null && node instanceof ObjectNode object)
+                            object.put("odata.etag", eTag);
+                        return node;
+                    } catch (Exception e) {
+                        if (acceptedWrite) throw new AcceptedWriteException();
+                        throw new IllegalStateException(
+                                "SharePoint returned an unreadable response.", e);
+                    }
+                });
     }
 
-    private ResponseEntity<String> exchange(
-            HttpMethod method, String path, Object body, HttpHeaders extra) {
+    private <T> T exchange(
+            HttpMethod method,
+            String path,
+            Object body,
+            HttpHeaders extra,
+            ResponseExtractor<T> extractor) {
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(tokens.accessToken());
         headers.set("Accept", "application/json;odata=verbose");
         headers.set("Content-Type", "application/json;odata=verbose");
         if (extra != null) headers.addAll(extra);
-        ResponseEntity<String> response =
-                rest.exchange(uri(path), method, new HttpEntity<>(body, headers), String.class);
-        if (!response.getStatusCode().is2xxSuccessful())
-            throw new RestClientException(
-                    "SharePoint returned an unexpected HTTP status ("
-                            + response.getStatusCode().value()
-                            + ").");
-        return response;
+        return rest.execute(
+                uri(path),
+                method,
+                rest.httpEntityCallback(new HttpEntity<>(body, headers)),
+                response -> {
+                    if (!response.getStatusCode().is2xxSuccessful())
+                        throw new RestClientException(
+                                "SharePoint returned an unexpected HTTP status ("
+                                        + response.getStatusCode().value()
+                                        + ").");
+                    return extractor == null ? null : extractor.extractData(response);
+                });
     }
 
     private URI uri(String path) {

@@ -1110,8 +1110,9 @@ function unsavedDetailFields(baseline, draft) {
 function replaceDraftPart(drafts, id, part, value) {
   const next = { ...drafts };
   const draft = { ...next[id] };
-  const content = ["owner", "detail"].includes(part) ? value.fields : value;
-  if (typeof content === "string" ? content.trim() : Object.keys(content).length) draft[part] = value;
+  const content = ["owner", "detail", "triage"].includes(part) ? value.fields : value;
+  const pendingTriage = part === "triage" && value.baseline && !value.baseline.eTag;
+  if (pendingTriage || (typeof content === "string" ? content.trim() : Object.keys(content).length)) draft[part] = value;
   else delete draft[part];
   if (Object.keys(draft).length) next[id] = draft;
   else delete next[id];
@@ -1134,7 +1135,7 @@ function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
 }
 
 function DraftRecovery({ draft, number, onDiscard }) {
-  const fields = { ...draft.detail?.fields, ...draft.owner?.fields, ...draft.triage, ...draft.hold };
+  const fields = { ...draft.detail?.fields, ...draft.owner?.fields, ...draft.triage?.fields, ...draft.hold };
   return (
     <section aria-label="Unsaved draft recovery" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
       <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery · {number}</h3>
@@ -1377,30 +1378,25 @@ function TriageQueue({ issues, onOpen }) {
   );
 }
 
-function triageDefaults(issue) {
-  return { transformedInto: "OFI", taskOwner: "", taskOwnerEmail: "", ownerBU: issue.departmentBU,
+export function triageDefaults(issue) {
+  return { ...issue, transformedInto: "OFI", taskOwner: "", taskOwnerEmail: "", ownerBU: issue.departmentBU,
     dueDate: addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity]), followUp: "" };
 }
 
-export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = false, onDraftChange }) {
+export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = false, onDraftChange, triageDraft }) {
+  const { baseline, fields } = triageDraft;
+  const draft = { ...baseline, ...fields };
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
   const [error, setError] = useState("");
-  const [needsReload, setNeedsReload] = useState(!issue.eTag);
-  const baseline = useRef(issue);
-  const cleanValues = useRef(triageDefaults(issue));
-  const accept = (patch) => {
-    for (const key of Object.keys(cleanValues.current)) {
-      if (Object.prototype.hasOwnProperty.call(patch, key)) cleanValues.current[key] = patch[key];
-    }
-  };
+  const [reloadRequired, setNeedsReload] = useState(false);
+  const needsReload = reloadRequired || !baseline.eTag || !issue.eTag;
   const persist = async (patch) => {
     if (busy || needsReload) return;
     setSaving(true); setError("");
-    try { await onTriage(issue.id, patch, baseline.current.eTag); accept(patch); }
+    try { await onTriage(issue.id, patch, baseline.eTag); }
     catch (failure) {
       setError(failure);
-      if (failure instanceof IssueRefreshError) accept(patch);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
     } finally { setSaving(false); }
   };
@@ -1410,21 +1406,14 @@ export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = fals
     catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
-  const [draft, setDraft] = useState(() => triageDefaults(issue));
   const { transformedInto, taskOwner, taskOwnerEmail, ownerBU, dueDate, followUp } = draft;
-  const edit = (key, value) => {
-    const next = { ...draft, [key]: value };
-    setDraft(next);
-    onDraftChange?.(issue.id, "triage", unsavedDetailFields(cleanValues.current, next));
-  };
-  const dirty = Object.keys(unsavedDetailFields(cleanValues.current, draft)).length > 0;
+  const edit = (key, value) => onDraftChange(issue.id, "triage", { baseline, fields: unsavedDetailFields(baseline, { ...draft, [key]: value }) });
   useEffect(() => {
-    if (!issueBusy && !dirty && issue !== baseline.current) {
-      baseline.current = issue;
-      cleanValues.current = triageDefaults(issue);
-      setDraft(triageDefaults(issue)); setNeedsReload(!issue.eTag);
+    if (baseline.eTag) {
+      setNeedsReload(false);
+      setError((current) => current instanceof IssueRefreshError ? "" : current);
     }
-  }, [issue, issueBusy]);
+  }, [baseline.eTag]);
   const nc = transformedInto === "NC Minor" || transformedInto === "NC Major";
 
   const create = () => {
@@ -2032,10 +2021,11 @@ export default function App({
       let nextArchiveId = currentDrafts.nextArchiveId;
       for (const issue of replaced) {
         const readOnly = issueIsReadOnly(issue, profile, userEmail, userDisplayName);
-        const draft = readOnly ? active[issue.id] : { triage: active[issue.id].triage };
-        archives[issue.id] = [...(archives[issue.id] || []), { id: nextArchiveId++, draft }];
+        const draft = readOnly ? { ...active[issue.id] } : { triage: active[issue.id].triage };
+        if (draft.triage && !Object.keys(draft.triage.fields).length) delete draft.triage;
+        if (Object.keys(draft).length) archives[issue.id] = [...(archives[issue.id] || []), { id: nextArchiveId++, draft }];
         if (readOnly) delete active[issue.id];
-        else active = replaceDraftPart(active, issue.id, "triage", {});
+        else active = replaceDraftPart(active, issue.id, "triage", { fields: {} });
       }
       return { active, archives, nextArchiveId };
     });
@@ -2047,15 +2037,13 @@ export default function App({
   const clearSubmittedDetail = (id, patch, saved, dispatchedDraft) => setDrafts((currentDrafts) => {
     if (!currentDrafts.active[id]) return currentDrafts;
     let active = currentDrafts.active;
-    for (const part of ["hold", "triage"]) {
-      const fields = { ...currentDrafts.active[id][part] };
-      for (const key of Object.keys(fields)) {
-        const value = part === "hold" && key === "holdReason" ? fields[key].trim() : fields[key];
-        if (value === patch[key]) delete fields[key];
-      }
-      active = replaceDraftPart(active, id, part, fields);
+    const hold = { ...currentDrafts.active[id].hold };
+    for (const key of Object.keys(hold)) {
+      const value = key === "holdReason" ? hold[key].trim() : hold[key];
+      if (value === patch[key]) delete hold[key];
     }
-    for (const part of ["detail", "owner"]) {
+    active = replaceDraftPart(active, id, "hold", hold);
+    for (const part of ["detail", "owner", "triage"]) {
       if (active[id]?.[part]) active = replaceDraftPart(active, id, part, acceptDetailDraft(active[id][part], saved, patch, dispatchedDraft?.[part]?.fields || {}));
     }
     return { ...currentDrafts, active };
@@ -2063,12 +2051,15 @@ export default function App({
   const discardDetail = (id) => setDrafts((currentDrafts) => ({
     ...currentDrafts, active: replaceDraftPart(replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", { fields: {} }), id, "hold", {}), id, "owner", { fields: {} }),
   }));
-  const recoverDetailDrafts = (refreshed) => setDrafts((currentDrafts) => {
+  const recoverDetailDrafts = (refreshed, reloadTriage = false) => setDrafts((currentDrafts) => {
     let active = currentDrafts.active;
     for (const saved of refreshed) {
-      for (const part of ["detail", "owner"]) {
+      for (const part of ["detail", "owner", "triage"]) {
         const draft = active[saved.id]?.[part];
-        if (draft && !draft.baseline.eTag && saved.eTag) active = replaceDraftPart(active, saved.id, part, acceptDetailDraft(draft, saved, {}, {}));
+        if (draft && saved.eTag && (!draft.baseline.eTag || (part === "triage" && reloadTriage))) {
+          const baseline = part === "triage" && !saved.triaged ? triageDefaults(saved) : saved;
+          active = replaceDraftPart(active, saved.id, part, acceptDetailDraft(draft, baseline, {}, {}));
+        }
       }
     }
     return active === currentDrafts.active ? currentDrafts : { ...currentDrafts, active };
@@ -2090,16 +2081,16 @@ export default function App({
       }
     });
   };
-  const acceptIssue = (saved) => {
+  const acceptIssue = (saved, reloadTriage = false) => {
     setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
-    recoverDetailDrafts([saved]);
+    recoverDetailDrafts([saved], reloadTriage);
     setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
   const reloadIssue = (id, discard = false) => runIssueOperation(id, async () => {
     const saved = await dataService.getIssue(id);
     if (discard) discardDetail(id);
-    return acceptIssue(saved);
+    return acceptIssue(saved, true);
   });
   const reloadSavedIssue = async () => {
     if (reloadingSaved) return;
@@ -2125,7 +2116,7 @@ export default function App({
         return acceptIssue(saved);
       } catch (error) {
         if (error instanceof IssueRefreshError) {
-          clearSubmittedDetail(id, normalized, { ...(dispatchedDraft?.owner?.baseline || dispatchedDraft?.detail?.baseline || previous), ...normalized, eTag: undefined }, dispatchedDraft);
+          clearSubmittedDetail(id, normalized, { ...(dispatchedDraft?.owner?.baseline || dispatchedDraft?.detail?.baseline || dispatchedDraft?.triage?.baseline || previous), ...normalized, eTag: undefined }, dispatchedDraft);
           setIssues((items) => items.map((item) => item.id === id
             ? { ...item, ...((previous.triaged && previous.status !== "Closed") || normalized.status === "Closed" || profile === "owner" ? normalized : {}), eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
@@ -2318,7 +2309,7 @@ export default function App({
     } else {
       body = current.triaged
         ? <QMIssueDetail detailDraft={drafts.active[current.id]?.detail || { baseline: current, fields: {} }} progressDraft={drafts.active[current.id]?.progress} acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id, keepDraft) => reloadIssue(id, !keepDraft)} author={userDisplayName} onDraftChange={recordDraft} />
-        : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} onDraftChange={recordDraft} />;
+        : <TriageForm triageDraft={drafts.active[current.id]?.triage || { baseline: triageDefaults(current), fields: {} }} issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} onDraftChange={recordDraft} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} dataService={dataService} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;

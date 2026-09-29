@@ -7,6 +7,8 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.configuration.security.SharePointAccessTokenProvider;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
@@ -15,6 +17,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.client.MockClientHttpRequest;
+import org.springframework.mock.http.client.MockClientHttpResponse;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
@@ -71,6 +74,34 @@ class SharePointRestClientTest {
         fields.put("Triaged", "Yes");
         fields.put("DueDate", null);
         client.updateItem("Issues", 42, fields, "\"4\"");
+        server.verify();
+    }
+
+    @Test
+    void successfulMergeDoesNotReadAnUnusedBrokenResponseBody() {
+        var reads = new AtomicInteger();
+        server.expect(anything())
+                .andRespond(
+                        withSuccess(
+                                "{\"d\":{\"ListItemEntityTypeFullName\":\"SP.Data.IssuesListItem\",\"RootFolder\":{}}}",
+                                MediaType.APPLICATION_JSON));
+        server.expect(anything())
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("IF-MATCH", "\"4\""))
+                .andExpect(header("X-HTTP-Method", "MERGE"))
+                .andRespond(
+                        request ->
+                                new MockClientHttpResponse(
+                                        new InputStream() {
+                                            @Override
+                                            public int read() throws IOException {
+                                                reads.incrementAndGet();
+                                                throw new IOException("Unused body interrupted");
+                                            }
+                                        },
+                                        HttpStatus.OK));
+        client.updateItem("Issues", 42, Map.of("FollowUp", "Saved"), "\"4\"");
+        assertEquals(0, reads.get());
         server.verify();
     }
 

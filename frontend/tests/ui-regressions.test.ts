@@ -34,7 +34,7 @@ Module._load = function (request: string, ...args: unknown[]): unknown {
   return /\.(scss|css)$/.test(request) ? {} : request === "@microsoft/sp-http" ? { AadHttpClient: { configurations: { v1: {} } } } : originalLoad.call(this, request, ...args);
 };
 const {
-  default: App, QMIssueDetail, OwnerIssueDetail, TriageForm, ReporterForm, ProgressLog, SettingsView, Dashboard,
+  default: App, QMIssueDetail, OwnerIssueDetail, TriageForm, triageDefaults, ReporterForm, ProgressLog, SettingsView, Dashboard,
 } = require("../src/webparts/qstarIssueManager/components/QstarPrototype");
 const { BackendApiDataService } = require("../src/webparts/qstarIssueManager/services/BackendApiDataService");
 const { default: QstarIssueManager } = require("../src/webparts/qstarIssueManager/components/QstarIssueManager");
@@ -67,12 +67,13 @@ function issue(overrides: Partial<IIssue> = {}): IIssue {
 }
 
 function ControlledEditor({ component: Component, input }: { component: React.ElementType; input: any }): React.ReactElement {
+  const cleanBaseline = (value: IIssue) => Component === TriageForm ? triageDefaults(value) : value;
   const [saved, setSaved] = React.useState(input.issue);
-  const [draft, setDraft] = React.useState({ baseline: input.issue, fields: {} as Record<string, unknown> });
+  const [draft, setDraft] = React.useState({ baseline: cleanBaseline(input.issue), fields: {} as Record<string, unknown> });
   const [progress, setProgress] = React.useState("");
   React.useEffect(() => {
     setSaved(input.issue);
-    setDraft(current => Object.keys(current.fields).length ? current : { baseline: input.issue, fields: {} });
+    setDraft(current => Object.keys(current.fields).length ? current : { baseline: cleanBaseline(input.issue), fields: {} });
   }, [input.issue]);
   const accept = (value: IIssue, patch: Partial<IIssue>, dispatched: Record<string, unknown>) => {
     setSaved(value);
@@ -85,8 +86,8 @@ function ControlledEditor({ component: Component, input }: { component: React.El
   const onUpdate = async (id: number, patch: Partial<IIssue>, eTag: string) => {
     const dispatched = draft.fields;
     try {
-      const result = await input.onUpdate(id, patch, eTag);
-      accept(result, patch, dispatched);
+      const result = await (Component === TriageForm ? input.onTriage(id, patch, eTag) : input.onUpdate(id, patch, eTag));
+      accept(result || { ...draft.baseline, ...patch }, patch, dispatched);
       return result;
     } catch (error) {
       if (error instanceof IssueRefreshError) accept({ ...draft.baseline, ...patch, eTag: undefined }, patch, dispatched);
@@ -112,16 +113,16 @@ function ControlledEditor({ component: Component, input }: { component: React.El
   };
   const onDraftChange = (id: number, part: string, value: any) => {
     if (part === "progress") setProgress(value);
-    if (part === "detail" || part === "owner") setDraft(value);
+    if (part === "detail" || part === "owner" || part === "triage") setDraft(value);
     input.onDraftChange?.(id, part, value);
   };
-  return React.createElement(Component, { ...input, issue: saved, ownerDraft: draft, detailDraft: draft, text: progress, progressDraft: progress,
-    onUpdate, onReload, onAdd: submitProgress, onAddProgress: submitProgress,
+  return React.createElement(Component, { ...input, issue: saved, ownerDraft: draft, detailDraft: draft, triageDraft: draft, text: progress, progressDraft: progress,
+    onUpdate, onTriage: onUpdate, onReload, onAdd: submitProgress, onAddProgress: submitProgress,
     onDraftChange: Component === ProgressLog ? setProgress : onDraftChange });
 }
 
 function render(component: React.ElementType, props: object): void {
-  const controlled = [QMIssueDetail, OwnerIssueDetail, ProgressLog].includes(component);
+  const controlled = [QMIssueDetail, OwnerIssueDetail, TriageForm, ProgressLog].includes(component);
   act(() => { ReactDOM.render(controlled ? React.createElement(ControlledEditor, { component, input: props }) : React.createElement(component, props), container); });
 }
 
@@ -1223,6 +1224,200 @@ for (const profile of ["qm", "owner"] as const) {
     assert.equal(progressInput().value, "Unsubmitted journal draft");
   });
 }
+
+for (const submitBeforeNavigation of [false, true]) {
+  test(`triage ${submitBeforeNavigation ? "rejected pending submission" : "unsent draft"} survives navigation and another field edit with its original ETag`, async () => {
+    const original = issue({ triaged: false, status: undefined, taskCreated: "No", transformedInto: undefined });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (submitBeforeNavigation && writes.length === 1) await pending.promise;
+      return { ...original, ...patch, eTag: '"2"' };
+    } }, [original]);
+    await click("Triage queue1"); await openIssue();
+    change("Transform into", "NC Major");
+    change("Task owner (gets reminders)", "Retained Owner");
+    change("Task owner Microsoft 365 email", "retained@example.com");
+    change("Escalation BU", "IT");
+    change("Follow up note (optional)", "Retained assessment");
+    const dueDate = field("Due date").value;
+    if (submitBeforeNavigation) await click("Create issue");
+    await click("Back to triage queue"); await openIssue();
+    assert.equal(field("Transform into").value, "NC Major");
+    assert.equal(field("Task owner (gets reminders)").value, "Retained Owner");
+    assert.equal(field("Task owner Microsoft 365 email").value, "retained@example.com");
+    assert.equal(field("Escalation BU").value, "IT");
+    assert.equal(field("Follow up note (optional)").value, "Retained assessment");
+    assert.equal(field("Due date").value, dueDate);
+    if (submitBeforeNavigation) {
+      assertFieldsDisabled(true);
+      await act(async () => { pending.reject(new Error("Triage rejected after navigation")); });
+      assert.match(container.textContent || "", /Triage rejected after navigation/);
+    }
+    change("Due date", "2026-12-01");
+    await click("Create issue");
+    assert.equal(writes.length, submitBeforeNavigation ? 2 : 1);
+    assert.deepEqual(writes[writes.length - 1], { patch: {
+      triaged: true, status: "Created", transformedInto: "NC Major", taskOwner: "Retained Owner",
+      taskOwnerEmail: "retained@example.com", ownerBU: "IT", dueDate: "2026-12-01", followUp: "Retained assessment", taskCreated: "Yes",
+    }, eTag: original.eTag });
+    await click("Issue register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Retained assessment");
+    assert.deepEqual(recoveredCopies(), []);
+  });
+}
+
+for (const action of ["Create issue", "Reject (no action)"]) {
+  for (const readbackFails of [false, true]) {
+    for (const newerEdit of [false, true]) {
+      test(`triage pending ${action} ${readbackFails ? "readback failure" : "success"} consumes dispatched fields across remount ${newerEdit ? "and preserves newer edits" : "without false archives"}`, async () => {
+        let stored = issue({ triaged: false, status: undefined, taskCreated: "No", transformedInto: undefined });
+        const pending = deferred<void>();
+        const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+        let reads = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes.push({ patch, eTag });
+            await pending.promise;
+            stored = { ...stored, ...patch, eTag: '"2"' };
+            if (readbackFails) throw new IssueRefreshError(stored.id);
+            return stored;
+          },
+          getIssue: async () => {
+            reads += 1;
+            if (reads === 1) throw new Error("Triage readback still unavailable");
+            return stored;
+          },
+        }, [stored]);
+        await click("Triage queue1"); await openIssue();
+        change("Transform into", "NC Major");
+        change("Task owner (gets reminders)", "Draft Owner");
+        change("Task owner Microsoft 365 email", "draft-owner@example.com");
+        change("Follow up note (optional)", "Dispatched assessment");
+        await click(action);
+        await click("Back to triage queue"); await openIssue();
+        assert.equal(field("Follow up note (optional)").value, "Dispatched assessment");
+        assertFieldsDisabled(true);
+        if (newerEdit) act(() => { Simulate.change(field("Follow up note (optional)"), { target: { value: "Newer assessment" } } as never); });
+        await act(async () => { pending.resolve(); });
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].eTag, '"1"');
+        assert.equal(stored.followUp, "Dispatched assessment");
+        if (readbackFails) {
+          const assertDraft = () => {
+            assert.equal(field("Follow up note (optional)").value, newerEdit ? "Newer assessment" : "Dispatched assessment");
+            assert.equal(field("Task owner (gets reminders)").value, "Draft Owner");
+            assert.equal(field("Task owner Microsoft 365 email").value, "draft-owner@example.com");
+            assert.equal(field("Transform into").value, "NC Major");
+            assert.equal(button("Create issue").disabled, true);
+            assert.equal(button("Reject (no action)").disabled, true);
+          };
+          assertDraft();
+          await click("Back to triage queue"); await openIssue(); assertDraft();
+          await click("Reload latest and return to queue"); assertDraft();
+          assert.equal(reads, 1);
+          assert.equal(writes.length, 1);
+          await click("Reload latest and return to queue");
+          assert.equal(reads, 2);
+        }
+        await click("Issue register"); await openIssue();
+        const expected: Record<string, string> = action === "Reject (no action)" ? {
+          "Transformed into": "NC Major", "Task owner": "Draft Owner", "Task owner Microsoft 365 email": "draft-owner@example.com",
+        } : {};
+        if (newerEdit) expected["Quality Team notes"] = "Newer assessment";
+        assert.deepEqual(recoveredCopies(), Object.keys(expected).length ? [expected] : []);
+        assert.equal(field("Follow up (Quality Team notes)").value, "Dispatched assessment");
+        change("Follow up (Quality Team notes)", "Fresh unrelated QM draft");
+        assert.deepEqual(recoveredCopies(), Object.keys(expected).length ? [expected] : []);
+        assert.equal(writes.length, 1);
+      });
+    }
+  }
+}
+
+test("triage explicit conflict reload refreshes clean defaults while preserving dirty fields", async () => {
+  const original = issue({ triaged: false, status: undefined });
+  const fresh = { ...original, reportDate: "2026-09-01", severity: "Medium" as const, eTag: '"2"' };
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) throw new IssueConflictError(original.id, fresh);
+      return { ...fresh, ...patch, eTag: '"3"' };
+    },
+    getIssue: async () => fresh,
+  }, [original]);
+  await click("Triage queue1"); await openIssue();
+  change("Task owner (gets reminders)", "Retained Owner");
+  change("Task owner Microsoft 365 email", "retained@example.com");
+  change("Follow up note (optional)", "Retained note");
+  await click("Create issue");
+  await click("Reload latest and return to queue"); await openIssue();
+  assert.equal(field("Task owner (gets reminders)").value, "Retained Owner");
+  assert.equal(field("Follow up note (optional)").value, "Retained note");
+  assert.equal(field("Due date").value, "2026-10-01");
+  change("Escalation BU", "IT"); await click("Create issue");
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].eTag, original.eTag);
+  assert.equal(writes[1].eTag, fresh.eTag);
+  assert.equal(writes[1].patch.dueDate, "2026-10-01");
+  assert.equal(writes[1].patch.followUp, "Retained note");
+  assert.equal(writes[1].patch.taskOwnerEmail, "retained@example.com");
+});
+
+test("triage rejection preserves a newer note equal to the action's overridden output", async () => {
+  const pending = deferred<void>();
+  const original = issue({ triaged: false, status: undefined });
+  const overridden = "Declined at triage — no quality action required.";
+  let writes = 0;
+  await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+    writes += 1;
+    assert.equal(patch.followUp, overridden);
+    await pending.promise;
+    return { ...original, ...patch, eTag: '"2"' };
+  } }, [original]);
+  await click("Triage queue1"); await openIssue();
+  change("Task owner (gets reminders)", "Unsubmitted Owner");
+  await click("Reject (no action)"); await click("Back to triage queue"); await openIssue();
+  act(() => { Simulate.change(field("Follow up note (optional)"), { target: { value: overridden } } as never); });
+  await act(async () => { pending.resolve(); });
+  await click("Issue register"); await openIssue();
+  assert.deepEqual(recoveredCopies(), [{ "Task owner": "Unsubmitted Owner", "Quality Team notes": overridden }]);
+  assert.equal(writes, 1);
+});
+
+test("another issue's receipt recovery preserves the original triage baseline and ETag", async () => {
+  const original = issue({ id: 2, qsNumber: 1002, triaged: false, status: undefined });
+  let stored = [issue(), original];
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  await renderApp({
+    loadIssues: async () => stored,
+    addProgressLogEntry: async () => { throw new AcceptedWriteError("progress", { issueId: 1 }); },
+    updateIssue: async (id: number, patch: Partial<IIssue>, eTag: string) => {
+      assert.equal(id, original.id);
+      writes.push({ patch, eTag });
+      throw new IssueConflictError(id, stored[1]);
+    },
+  }, stored, { userEmail: "triage-baseline@example.com" });
+  await click("Triage queue1"); await openIssue(1002);
+  change("Task owner (gets reminders)", "Retained Owner");
+  change("Task owner Microsoft 365 email", "retained@example.com");
+  change("Follow up note (optional)", "Retained assessment");
+  await click("Back to triage queue"); await click("Issue register"); await openIssue(1001);
+  writeProgress("Accepted A entry"); await click("Add update");
+  await click("Back to register"); await click("Triage queue1"); await openIssue(1002);
+  stored = [stored[0], { ...original, reportDate: "2026-09-01", severity: "Medium", eTag: '"2"' }];
+  await click("Reload saved data");
+  assert.equal(field("Due date").value, "2026-06-15");
+  assert.equal(field("Follow up note (optional)").value, "Retained assessment");
+  change("Escalation BU", "IT"); await click("Create issue");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].eTag, original.eTag);
+  assert.equal(writes[0].patch.dueDate, "2026-06-15");
+  assert.equal(writes[0].patch.taskOwnerEmail, "retained@example.com");
+  assert.match(container.textContent || "", /This issue changed since you opened it/);
+});
 
 test("triage remounted during an accepted write requires recovery before another submission", async () => {
   const pending = deferred<IIssue>();
