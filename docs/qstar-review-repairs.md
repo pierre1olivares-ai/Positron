@@ -29,10 +29,29 @@ Use the [tenant verification plan](../backend/sharepoint/connection-test-plan.md
 
 ## Evidence and limits
 
-The local integration of upstream `70ebc76` passed 163 frontend tests, 43 Java tests,
-and ten provisioning tests. SPFx lint/type/Sass/webpack checks, a clean production
-bundle/package, OpenAPI generation, Java 21 compilation, Spotless, and the executable
-JAR build also passed. The Java HTTP tests use signed synthetic tokens and mocked
-SharePoint/OBO endpoints; they do not establish tenant consent or access behavior.
+The integration repairs passed 254 frontend tests, 54 Java tests, and ten
+provisioning tests. After the history lint cleanup, all 46 affected history and
+dashboard tests passed again. SPFx lint/type/Sass/webpack checks and the shipping
+bundle/package, OpenAPI generation, Java 21 compilation, Spotless, and the executable JAR
+build also passed. The legacy prototype component retains its file-level static
+check exemptions; its behavior is covered by interaction tests. The Java HTTP tests
+use signed synthetic tokens and mocked SharePoint/OBO endpoints; they do not
+establish tenant consent or access behavior.
 
 Local checks execute domain rules, React interactions, mocked SharePoint service contracts, and stateful provisioning command doubles, plus the SPFx lint/type/build/package tools. They do not authenticate against Microsoft 365. Power Automate flows are deployment instructions in this repository, not installed flow exports. Tenant ACL behavior, native PowerShell execution, flow delivery/retries, and real SharePoint round trips require the acceptance checks above.
+
+## Retained dashboard history and navigation drafts
+
+QM detail and editable progress forms now use App-owned drafts, as owner detail already does. Navigating back and reopening an issue during a pending request retains the visible draft and its original clean baseline/ETag. Rejected requests leave that draft available for an explicit retry. Accepted requests consume only unchanged dispatched fields/text; newer edits, omitted fields and immutable recovery copies remain separate. There is no uncontrolled owner/QM/progress editor mode in production. Drafts and recovery copies remain in memory for this App session.
+
+The backend permits authorized progress updates and journal notes on Rejected issues, matching the direct client. Closed restrictions, native owner identity, owner field restrictions and journal-only access during effectiveness testing remain enforced.
+
+Historical backlog now reads retained native Issues versions when the dashboard is visible, with at most four item reads in parallel. Direct SharePoint and the optional backend exhaust the version collection, pin continuation URLs to the configured collection, and compare the current item before and after reading. The read-only API is `GET /api/v1/issues/{id}/history`. The response contains `issueId`, `eTag`, `current`, `versions` and `complete`; unsupported or missing native fields are preserved rather than defaulted. History reads do not update issue snapshots or block normal list loading/editing. Revision-keyed caches and stale-response checks protect the chart during concurrent changes.
+
+Coverage uses native item `Created`, `Modified`, `OData__UIVersionString`, and version `VersionId`, `VersionLabel`, `Created`, `IsCurrentVersion`, `Triaged`, `TaskCreated` and `Status`. Only supported major-version labels (`1.0`, `2.0`, etc.) and an internally consistent, contiguous retained suffix establish recorded state. Version IDs are identities, not consecutive ordinals. Retention, missing versions, unsupported shapes/labels, invalid fields/timestamps, denied/incomplete paging and changed snapshots leave affected periods unavailable. Native creation time can prove nonexistence; ReportDate and today's ClosedAt/status cannot supply historical coverage. The mock emulates versions for writes in the current service instance; older persisted mock records without retained versions remain unknown.
+
+Backlog includes the current visible register under the current department/region filters, including currently rejected or untriaged records whose historical eligibility may differ. Monthly gaps and unavailable YTD changes are explicit; lines do not bridge gaps. Other classification filters continue to describe current-record cohorts. Report/closure bars use current record dates and do not count every reopen cycle. This does not reconstruct historical department/region membership, deleted/inaccessible items, unversioned SystemUpdate or administrative overwrite operations. No durable ledger, schema, migration, flow or permission changes were added.
+
+Tenant acceptance must confirm version access, actual top-level choice values and metadata, exhaustive continuation behavior, current-version alignment and retention coverage for both direct and delegated REST modes. Local fixtures exercise the protocol and UI, not tenant success. The accepted live Microsoft 365, native PowerShell, ACL, flow and deployment evidence gap remains; the backend stays disabled and tenant verification remains mandatory before activation.
+
+The read contract follows [PnPjs item version history](https://pnp.github.io/pnpjs/sp/items/#get-version-history), the [PnP native version field mapping](https://github.com/pnp/pnpcore/blob/dev/src/sdk/PnP.Core/Model/SharePoint/Core/Internal/ListItemVersion.cs), and [Microsoft's current list-item REST metadata](https://learn.microsoft.com/en-us/sharepoint/dev/sp-add-ins/working-with-lists-and-list-items-with-rest).

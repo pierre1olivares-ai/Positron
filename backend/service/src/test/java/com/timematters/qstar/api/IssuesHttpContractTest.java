@@ -15,7 +15,10 @@ import com.timematters.qstar.infrastructure.sharepoint.IssueRepository;
 import com.timematters.qstar.model.Issue;
 import com.timematters.qstar.model.ProgressLogEntry;
 import com.timematters.qstar.service.IssueService;
-
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -25,11 +28,6 @@ import org.springframework.http.converter.json.MappingJackson2HttpMessageConvert
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.client.RestClientException;
-
-import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.util.Map;
 
 class IssuesHttpContractTest {
     private final IssueRepository repository = mock(IssueRepository.class);
@@ -240,5 +238,42 @@ class IssuesHttpContractTest {
                 verifyNoMoreInteractions(repository);
             }
         }
+    }
+
+    @Test
+    void historyGetPreservesRawCoverageAndRequiresNoMutation() throws Exception {
+        when(users.currentUser())
+                .thenReturn(new CallerContext("reader", 9, "Reader", "reader@example.com"));
+        when(repository.history(42))
+                .thenReturn(
+                        Map.of(
+                                "issueId",
+                                42L,
+                                "eTag",
+                                "\"3\"",
+                                "complete",
+                                false,
+                                "current",
+                                Map.of("Id", 42L, "OData__UIVersionString", "3.0"),
+                                "versions",
+                                java.util.List.of(
+                                        Map.of(
+                                                "VersionId",
+                                                1536,
+                                                "VersionLabel",
+                                                "3.0",
+                                                "Triaged",
+                                                "Yes"))));
+        mvc.perform(get("/api/v1/issues/42/history"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.issueId").value(42))
+                .andExpect(jsonPath("$.eTag").value("\"3\""))
+                .andExpect(jsonPath("$.complete").value(false))
+                .andExpect(jsonPath("$.current.OData__UIVersionString").value("3.0"))
+                .andExpect(jsonPath("$.versions[0].VersionId").value(1536))
+                .andExpect(jsonPath("$.versions[0].Triaged").value("Yes"))
+                .andExpect(jsonPath("$.versions[0].TaskCreated").doesNotExist());
+        verify(repository, never()).update(anyLong(), anyMap(), anyString());
+        verify(repository, never()).append(anyLong(), anyString(), any());
     }
 }

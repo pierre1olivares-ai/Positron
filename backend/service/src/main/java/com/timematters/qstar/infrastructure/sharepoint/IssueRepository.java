@@ -100,6 +100,23 @@ public class IssueRepository {
         return toIssue(row, offset, entries);
     }
 
+    public Map<String, Object> history(long id) {
+        String query =
+                "$select=Id,Created,Modified,OData__UIVersionString,Triaged,TaskCreated,Status";
+        var current = client.getItem(properties.getIssuesListName(), id, query);
+        var versions = client.getItemVersions(properties.getIssuesListName(), id);
+        var after = client.getItem(properties.getIssuesListName(), id, query);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("issueId", id);
+        result.put("eTag", eTag(current));
+        result.put("current", current);
+        result.put("versions", versions);
+        result.put(
+                "complete",
+                eTag(current) != null && !eTag(current).equals("*") && current.equals(after));
+        return result;
+    }
+
     public Issue create(Map<String, Object> input) {
         long offset = referenceOffset();
         var fields = toFields(input);

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.api.model.IssueATO;
 import com.timematters.qstar.api.model.IssueCreateATO;
+import com.timematters.qstar.api.model.IssueHistoryATO;
 import com.timematters.qstar.api.model.IssuePatchATO;
 import com.timematters.qstar.api.model.ProgressCreateATO;
 import com.timematters.qstar.api.model.ProgressLogEntryATO;
@@ -151,8 +152,8 @@ public class IssueService {
         CallerContext caller = users.currentUser();
         Issue issue = repository.findById(id);
         contributor(caller, issue);
-        if (Set.of("Closed", "Rejected").contains(text(issue.getStatus())))
-            invalid("Closed or rejected issues cannot receive progress updates.");
+        if ("Closed".equals(issue.getStatus()))
+            invalid("Closed issues cannot receive progress updates.");
         String text = input.getText();
         if (text == null || text.isBlank() || text.length() > 63000)
             invalid("Enter a progress update of 1 to 63000 characters.");
@@ -162,6 +163,11 @@ public class IssueService {
                         text,
                         new SharePointUser(
                                 caller.sharePointUserId(), caller.displayName(), caller.email())));
+    }
+
+    public IssueHistoryATO getIssueHistory(long id) {
+        users.currentUser();
+        return json.convertValue(repository.history(id), IssueHistoryATO.class);
     }
 
     public ProgressLogEntryATO getProgressEntry(long id, long entryId) {
@@ -193,7 +199,7 @@ public class IssueService {
         if (caller.role().equals("admin") || caller.role().equals("qm")) return;
         if (!caller.role().equals("owner")
                 || !Objects.equals(issue.getTaskOwnerId(), caller.sharePointUserId())
-                || Set.of("Closed", "Rejected").contains(text(issue.getStatus()))) {
+                || "Closed".equals(issue.getStatus())) {
             throw new AccessDeniedException(
                     "Only the current task owner or the Quality Team can change this issue.");
         }

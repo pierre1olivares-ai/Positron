@@ -1,5 +1,7 @@
 /* eslint-disable */
 // @ts-nocheck
+import { historicalBacklog } from "../domain/issueHistory";
+import { useIssueHistory } from "./useIssueHistory";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import type { IDataService } from "../services/IDataService";
 import type { Role } from "../models/IRole";
@@ -499,7 +501,7 @@ function FlowTooltip({ active, payload, label }) {
       <div className="space-y-1">
         <div className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><Dot color={CHART.teal} />Opened</span><strong className="text-slate-800">{d.Created}</strong></div>
         <div className="flex items-center justify-between gap-4"><span className="flex items-center gap-1.5"><Dot color={CHART.emerald} />Closed</span><strong className="text-slate-800">{d.Closed}</strong></div>
-        <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-1"><span className="flex items-center gap-1.5"><Dot color={BRAND.yellow} />Open backlog</span><strong className="text-slate-800">{d.Backlog}</strong></div>
+        <div className="flex items-center justify-between gap-4 border-t border-slate-100 pt-1"><span className="flex items-center gap-1.5"><Dot color={BRAND.yellow} />Open backlog</span><strong className="text-slate-800">{d.Backlog ?? "Unavailable"}</strong></div>
         <div className="flex items-center justify-between gap-4"><span className="text-slate-500">Net this month</span><strong className={d.Net > 0 ? "text-rose-600" : d.Net < 0 ? "text-emerald-600" : "text-slate-500"}>{d.Net > 0 ? "+" : ""}{d.Net}</strong></div>
       </div>
     </div>
@@ -524,7 +526,7 @@ function ChartNote({ children }) {
   return <p className="mt-3 border-t border-slate-100 pt-2 text-xs text-slate-400">{children}</p>;
 }
 
-export function Dashboard({ issues: allIssues }) {
+export function Dashboard({ issues: allIssues, dataService }) {
   const [cumCat, setCumCat] = useState("All");
   const [cumStatus, setCumStatus] = useState("All");
   const [cumGran, setCumGran] = useState("Month");
@@ -535,10 +537,11 @@ export function Dashboard({ issues: allIssues }) {
   const regionOptions = [...new Set(allIssues.map((i) => i.region).filter(Boolean))].sort();
   // Global dashboard filter — applies to every KPI and chart below
   const issues = allIssues.filter((i) => (!fDept || i.departmentBU === fDept) && (!fRegion || i.region === fRegion));
+  const histories = useIssueHistory(issues, dataService);
   const filterActive = !!(fDept || fRegion);
   const created = issues.filter((i) => i.triaged && i.status !== "Rejected");
   // Current-year scope for the dashboard graphs (the Cumulative chart deliberately spans all years)
-  const nowD = today();
+  const nowD = new Date();
   const asOf = iso(nowD);
   const datedCreated = created.filter((i) => iso(i.reportDate) && iso(i.reportDate) <= asOf);
   const curYear = nowD.getFullYear();
@@ -579,21 +582,24 @@ export function Dashboard({ issues: allIssues }) {
   const ncVerified = ncs.filter((i) => i.verifiedBy);
   const ncRate = ncs.length ? Math.round((ncVerified.length / ncs.length) * 100) : 0;
 
-  // Monthly trend — current year (Jan → current month)
-  const backlogAt = (end) => datedCreated.filter((i) => iso(i.reportDate) <= end && (isOpen(i) || (i.taskCreated === "Yes" && i.status === "Closed" && iso(i.closedDate) > end))).length;
+  // Closed months end just before the next local month; the current month stops now.
+  const backlogAt = (boundary) => historicalBacklog(issues, histories, boundary);
+  // The history helper has an exclusive cutoff; include the captured current millisecond.
+  const currentBoundary = new Date(nowD.getTime() + 1);
   const months = [];
   for (let mo = 0; mo <= nowD.getMonth(); mo++) {
     const d = new Date(curYear, mo, 1);
-    months.push({ key: d.toLocaleDateString("en-GB", { month: "short", year: "2-digit" }), month: iso(d).slice(0, 7), end: mo === nowD.getMonth() ? asOf : iso(new Date(curYear, mo + 1, 0)) });
+    months.push({ key: d.toLocaleDateString("en-GB", { month: "short", year: "2-digit" }), month: iso(d).slice(0, 7), end: mo === nowD.getMonth() ? asOf : iso(new Date(curYear, mo + 1, 0)), boundary: mo === nowD.getMonth() ? currentBoundary : new Date(curYear, mo + 1, 1) });
   }
-  const trend = months.map(({ key, month, end }) => {
+  const trend = months.map(({ key, month, end, boundary }) => {
     const c = datedCreated.filter((i) => iso(i.reportDate).slice(0, 7) === month).length;
     const cl = closed.filter((i) => iso(i.closedDate).slice(0, 7) === month && iso(i.closedDate) <= end).length;
-    // Open backlog at month-end: created on/before end, and not yet closed by end (all-time, so the backlog is accurate)
-    const backlog = backlogAt(end);
-    return { name: key, Created: c, Closed: cl, Backlog: backlog, Net: c - cl };
+    const backlog = backlogAt(boundary);
+    return { name: key, Created: c, Closed: cl, Backlog: backlog ?? null, Net: c - cl };
   });
-  const backlogChange = backlogAt(asOf) - backlogAt(addDays(yearStart, -1));
+  const currentBacklog = backlogAt(currentBoundary);
+  const startingBacklog = backlogAt(yearStart);
+  const backlogChange = currentBacklog === undefined || startingBacklog === undefined ? undefined : currentBacklog - startingBacklog;
 
   const sevColors = { Critical: CHART.rose, High: CHART.orange, Medium: CHART.amber, Low: CHART.slate };
   const sourceColors = [CHART.violet, CHART.teal];
@@ -675,11 +681,11 @@ export function Dashboard({ issues: allIssues }) {
       <Card className="p-4">
         <SectionTitle icon={RefreshCw} right={
           <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold ring-1 ring-inset ${backlogChange > 0 ? "bg-rose-50 text-rose-700 ring-rose-200" : backlogChange < 0 ? "bg-emerald-50 text-emerald-700 ring-emerald-200" : "bg-slate-100 text-slate-600 ring-slate-200"}`}>
-            Backlog {backlogChange > 0 ? `▲ +${backlogChange}` : backlogChange < 0 ? `▼ ${backlogChange}` : "flat"} year to date
+            Backlog {backlogChange === undefined ? "unavailable" : backlogChange > 0 ? `▲ +${backlogChange}` : backlogChange < 0 ? `▼ ${backlogChange}` : "flat"} year to date
           </span>
         }>Issue flow — opened vs. closed, with open backlog</SectionTitle>
         <p className="-mt-1 mb-4 text-xs leading-relaxed text-slate-500">
-          Bars show how many issues were <span className="font-semibold tm-text-navy">opened</span> and <span className="font-semibold text-emerald-700">closed</span> each month. The <span className="font-semibold text-amber-600">backlog line</span> is how many remain open at month-end — when it climbs, issues are arriving faster than they're being resolved.
+          Bars show how many issues were <span className="font-semibold tm-text-navy">opened</span> and <span className="font-semibold text-emerald-700">closed</span> each month. The <span className="font-semibold text-amber-600">backlog line</span> shows eligible open tasks at each local month-end, with the current month measured as of now, including recorded reopening and eligibility changes.
         </p>
         <ResponsiveContainer width="100%" height={300}>
           <ComposedChart data={trend} margin={{ top: 18, right: 6, left: -6, bottom: 0 }} barGap={2} barCategoryGap="24%">
@@ -695,12 +701,13 @@ export function Dashboard({ issues: allIssues }) {
             <Bar yAxisId="left" dataKey="Closed" name="Closed" fill={CHART.emerald} radius={[3, 3, 0, 0]} maxBarSize={26}>
               <LabelList dataKey="Closed" position="top" formatter={(v) => v || ""} style={{ fontSize: 10, fill: "#047857", fontWeight: 600 }} />
             </Bar>
-            <Line yAxisId="right" type="monotone" dataKey="Backlog" name="Open backlog" stroke={BRAND.yellow} strokeWidth={3} dot={{ r: 3, fill: BRAND.yellow, stroke: "#fff", strokeWidth: 1 }} activeDot={{ r: 5 }}>
+            <Line connectNulls={false} yAxisId="right" type="linear" dataKey="Backlog" name="Open backlog" stroke={BRAND.yellow} strokeWidth={3} dot={{ r: 3, fill: BRAND.yellow, stroke: "#fff", strokeWidth: 1 }} activeDot={{ r: 5 }}>
               <LabelList dataKey="Backlog" position="top" formatter={(v) => v || ""} style={{ fontSize: 10, fill: "#b45309", fontWeight: 700 }} />
             </Line>
           </ComposedChart>
         </ResponsiveContainer>
-        <ChartNote>{ytdRange}</ChartNote>
+        <ChartNote>{ytdRange} Backlog uses retained recorded history for the current register and current filters. Gaps mean history is unavailable. Bars use current report and closure dates.</ChartNote>
+        <details className="mt-2 text-xs text-slate-500"><summary>Monthly backlog values</summary><table aria-label="Historical backlog"><tbody>{trend.map(row => <tr key={row.name}><th className="pr-4 text-left">{row.name}</th><td>{row.Backlog ?? "Unavailable"}</td></tr>)}</tbody></table></details>
       </Card>
 
       {/* ---- Cumulative issues by category: resets each year + per-year trend arrows ---- */}
@@ -943,10 +950,9 @@ function Register({ issues, onOpen, filter, setFilter }) {
 /* ============================================================
    Progress log (append-only UI; enforcement depends on SharePoint ACLs)
    ============================================================ */
-export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange, acceptedReceipt }) {
+export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, onDraftChange, acceptedReceipt, text = "" }) {
   const mounted = useRef(true);
   useEffect(() => () => { mounted.current = false; }, []);
-  const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const submit = async () => {
@@ -957,10 +963,8 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, 
     try {
       await onAdd({ ts: new Date().toISOString(), author, text: submittedText });
       if (!mounted.current) return;
-      setText((current) => current.trim() === submittedText ? "" : current);
     } catch (failure) {
       if (!mounted.current) return;
-      if (failure instanceof AcceptedWriteError) setText((current) => current.trim() === submittedText ? "" : current);
       setError(failure instanceof Error ? failure.message : String(failure));
     } finally { if (mounted.current) setSaving(false); }
   };
@@ -971,7 +975,7 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, 
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
           {acceptedReceipt && <p role="status" className="mb-2 text-sm text-amber-800">{ACCEPTED_RECEIPT_MESSAGE} Submitted note: {acceptedReceipt.submitted}</p>}
-          <TextArea disabled={disabled || saving || !!acceptedReceipt} value={text} onChange={(e) => { setText(e.target.value); onDraftChange?.(e.target.value); }} placeholder="What did you do? What are the next steps or blockers?" />
+          <TextArea disabled={disabled || saving || !!acceptedReceipt} value={text} onChange={(e) => onDraftChange(e.target.value)} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
             <Btn disabled={disabled || !!acceptedReceipt || !text.trim() || saving} onClick={submit}><Plus size={15} />{saving ? "Saving…" : "Add update"}</Btn>
@@ -1106,7 +1110,7 @@ function unsavedDetailFields(baseline, draft) {
 function replaceDraftPart(drafts, id, part, value) {
   const next = { ...drafts };
   const draft = { ...next[id] };
-  const content = part === "owner" ? value.fields : value;
+  const content = ["owner", "detail"].includes(part) ? value.fields : value;
   if (typeof content === "string" ? content.trim() : Object.keys(content).length) draft[part] = value;
   else delete draft[part];
   if (Object.keys(draft).length) next[id] = draft;
@@ -1114,7 +1118,7 @@ function replaceDraftPart(drafts, id, part, value) {
   return next;
 }
 
-function acceptOwnerDraft(draft, saved, patch, dispatchedFields) {
+function acceptDetailDraft(draft, saved, patch, dispatchedFields) {
   const fields = { ...draft.fields };
   for (const key of Object.keys(patch)) {
     if (fields[key] === dispatchedFields[key]) delete fields[key];
@@ -1130,7 +1134,7 @@ function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
 }
 
 function DraftRecovery({ draft, number, onDiscard }) {
-  const fields = { ...draft.detail, ...draft.owner?.fields, ...draft.triage, ...draft.hold };
+  const fields = { ...draft.detail?.fields, ...draft.owner?.fields, ...draft.triage, ...draft.hold };
   return (
     <section aria-label="Unsaved draft recovery" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
       <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery · {number}</h3>
@@ -1187,34 +1191,31 @@ function NCTestBanner({ i }) {
 /* ============================================================
    QM Issue detail (full edit)
    ============================================================ */
-export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false, onDraftChange, acceptedProgress }) {
-  const [d, setD] = useState(issue);
-  const [baseline, setBaseline] = useState(issue);
+export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload, author, issueBusy = false, onDraftChange, acceptedProgress, detailDraft, progressDraft }) {
+  const { baseline, fields } = detailDraft;
+  const d = { ...baseline, ...fields };
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
   const [error, setError] = useState("");
-  const [needsReload, setNeedsReload] = useState(!issue.eTag);
+  const [reloadRequired, setNeedsReload] = useState(false);
+  const needsReload = reloadRequired || !baseline.eTag || !issue.eTag;
   const [holdOpen, setHoldOpen] = useState(false);
-  const [hadUpdate, setHadUpdate] = useState(issue.ownerUpdate); // header badge, snapshot per opened issue
-  useEffect(() => { setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setError(""); setNeedsReload(!issue.eTag); }, [issue.id]);
-  const set = (k, v) => {
-    const next = { ...d, [k]: v };
-    setD(next);
-    onDraftChange?.(issue.id, "detail", unsavedDetailFields(baseline, next));
-  };
-  const dirty = Object.keys(changedIssueFields(baseline, d)).length > 0;
+  const hadUpdate = baseline.ownerUpdate;
+  const set = (k, v) => onDraftChange(issue.id, "detail", { baseline, fields: unsavedDetailFields(baseline, { ...d, [k]: v }) });
+  const dirty = Object.keys(fields).length > 0;
+  const keepDraftOnReload = !baseline.eTag && dirty;
   useEffect(() => {
-    if (!issueBusy && !dirty && issue !== baseline) {
-      setD(issue); setBaseline(issue); setHadUpdate(issue.ownerUpdate); setNeedsReload(!issue.eTag);
+    if (baseline.eTag) {
+      setNeedsReload(false);
+      setError((current) => current instanceof IssueRefreshError ? "" : current);
     }
-  }, [issue, issueBusy]);
+  }, [baseline.eTag]);
   const nc = isNC(d);
   const testEnd = ncTestEnd(d);
   const inTest = inNCTest(d);
   const testLeft = ncTestDaysLeft(d);
   const testDone = ncTestComplete(d);
 
-  const acceptSaved = (saved) => { setD(saved); setBaseline(saved); setHadUpdate(saved.ownerUpdate); };
   const save = async (extra = {}) => {
     if (busy || needsReload) return false;
     setSaving(true);
@@ -1224,11 +1225,10 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
       if (next.taskOwner && !next.taskOwnerEmail) throw new Error("Enter the task owner's Microsoft 365 email.");
       if (next.verifiedBy && !next.verifiedByEmail && !next.verifiedById) throw new Error("Enter the verifier's Microsoft 365 email.");
       const patch = buildIssueTransition(baseline, changedIssueFields(baseline, next));
-      acceptSaved(await onUpdate(issue.id, patch, baseline.eTag));
+      await onUpdate(issue.id, patch, baseline.eTag);
       return true;
     } catch (failure) {
       setError(failure);
-      if (failure instanceof IssueRefreshError) acceptSaved({ ...next, eTag: undefined });
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
       return false;
     } finally { setSaving(false); }
@@ -1238,7 +1238,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
   const close = () => save({ status: "Closed" });
   const reload = async () => {
     setSaving(true);
-    try { acceptSaved(await onReload(issue.id)); setNeedsReload(false); setError(""); }
+    try { await onReload(issue.id, keepDraftOnReload); setNeedsReload(false); setError(""); }
     catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
@@ -1247,7 +1247,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to register</button>
       <IssueSaveNotice error={error} />
-      {needsReload && <Btn disabled={busy} variant="ghost" onClick={reload}>Reload latest and discard draft</Btn>}
+      {needsReload && <Btn disabled={busy} variant="ghost" onClick={reload}>{keepDraftOnReload ? "Reload latest and keep draft" : "Reload latest and discard draft"}</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
@@ -1308,7 +1308,7 @@ export function QMIssueDetail({ issue, onBack, onUpdate, onAddProgress, onReload
             </Card>
           )}
 
-          <Card className="p-4"><ProgressLog acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
+          <Card className="p-4"><ProgressLog text={progressDraft || ""} acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={author} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(entry) => onAddProgress(issue.id, entry)} /></Card>
         </div>
 
         <div className="space-y-4 lg:col-span-2">
@@ -1784,10 +1784,8 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange, acceptedProgress, ownerDraft }) {
-  const [localDraft, setLocalDraft] = useState({ baseline: issue, fields: {} });
-  const draft = ownerDraft || localDraft;
-  const { baseline, fields } = draft;
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange, acceptedProgress, ownerDraft, progressDraft }) {
+  const { baseline, fields } = ownerDraft;
   const status = fields.status ?? baseline.status;
   const impl = fields.implementationDate ?? baseline.implementationDate ?? "";
   const [saving, setSaving] = useState(false);
@@ -1796,7 +1794,6 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
   const [reloadRequired, setReloadRequired] = useState(false);
   const needsReload = reloadRequired || !baseline.eTag || !issue.eTag;
   const [holdOpen, setHoldOpen] = useState(false);
-  useEffect(() => { setLocalDraft({ baseline: issue, fields: {} }); setReloadRequired(false); setError(""); }, [issue.id]);
   useEffect(() => {
     if (baseline.eTag) {
       setReloadRequired(false);
@@ -1805,16 +1802,10 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
   }, [baseline.eTag]);
   const dirty = Object.keys(fields).length > 0;
   const keepDraftOnReload = !baseline.eTag && dirty;
-  useEffect(() => {
-    if (!ownerDraft && !issueBusy && !dirty && issue !== baseline) {
-      setLocalDraft({ baseline: issue, fields: {} });
-    }
-  }, [issue, issueBusy]);
   const record = (key, value) => {
     const next = { baseline, fields: { ...fields, [key]: value } };
     if (value === (baseline[key] || "")) delete next.fields[key];
-    setLocalDraft(next);
-    onDraftChange?.(issue.id, "owner", next);
+    onDraftChange(issue.id, "owner", next);
   };
   const persist = async (patch) => {
     if (busy || needsReload) return false;
@@ -1822,13 +1813,11 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     let normalized = patch;
     try {
       normalized = buildIssueTransition(baseline, patch);
-      const saved = await onUpdate(issue.id, normalized, baseline.eTag);
-      setLocalDraft((current) => acceptOwnerDraft(current, saved, normalized, fields));
+      await onUpdate(issue.id, normalized, baseline.eTag);
       return true;
     }
     catch (failure) {
       setError(failure);
-      if (failure instanceof IssueRefreshError) setLocalDraft((current) => acceptOwnerDraft(current, { ...baseline, ...normalized, eTag: undefined }, normalized, fields));
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setReloadRequired(true);
       return false;
     } finally { setSaving(false); }
@@ -1836,8 +1825,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
   const reload = async () => {
     setSaving(true);
     try {
-      const saved = await onReload(issue.id, keepDraftOnReload);
-      setLocalDraft((current) => keepDraftOnReload ? acceptOwnerDraft(current, saved, {}, {}) : { baseline: saved, fields: {} });
+      await onReload(issue.id, keepDraftOnReload);
       setReloadRequired(false); setError("");
     }
     catch (failure) { setError(failure); }
@@ -1881,7 +1869,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               {issue.followUp && <ReadRow label="QM follow-up note" value={<span className="whitespace-pre-wrap">{issue.followUp}</span>} />}
             </dl>
           </Card>
-          <Card className="p-4"><ProgressLog acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
+          <Card className="p-4"><ProgressLog text={progressDraft || ""} acceptedReceipt={acceptedProgress} entries={issue.progressLog} canAdd disabled={busy || !issue.eTag} author={owner} onDraftChange={(text) => onDraftChange?.(issue.id, "progress", text)} onAdd={(e) => onAddProgress(issue.id, e)} /></Card>
         </div>
 
         <div className="lg:col-span-2">
@@ -1998,7 +1986,7 @@ export default function App({
         throw new Error("Issues changed during the reload. Wait for pending work to finish, then reload saved data again.");
       }
       setIssues(refreshed);
-      recoverOwnerDrafts(refreshed);
+      recoverDetailDrafts(refreshed);
       const remaining = { ...readAcceptedReceipts(recoveryKey) };
       Object.keys(recoveringReceipts).forEach((key) => {
         if (remaining[key] === recoveringReceipts[key]) delete remaining[key];
@@ -2056,10 +2044,10 @@ export default function App({
   const recordDraft = (id, part, value) => setDrafts((currentDrafts) => ({
     ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, part, value),
   }));
-  const clearSubmittedDetail = (id, patch, saved, dispatchedOwnerFields) => setDrafts((currentDrafts) => {
+  const clearSubmittedDetail = (id, patch, saved, dispatchedDraft) => setDrafts((currentDrafts) => {
     if (!currentDrafts.active[id]) return currentDrafts;
     let active = currentDrafts.active;
-    for (const part of ["detail", "hold", "triage"]) {
+    for (const part of ["hold", "triage"]) {
       const fields = { ...currentDrafts.active[id][part] };
       for (const key of Object.keys(fields)) {
         const value = part === "hold" && key === "holdReason" ? fields[key].trim() : fields[key];
@@ -2067,18 +2055,20 @@ export default function App({
       }
       active = replaceDraftPart(active, id, part, fields);
     }
-    if (active[id]?.owner) active = replaceDraftPart(active, id, "owner", acceptOwnerDraft(active[id].owner, saved, patch, dispatchedOwnerFields));
+    for (const part of ["detail", "owner"]) {
+      if (active[id]?.[part]) active = replaceDraftPart(active, id, part, acceptDetailDraft(active[id][part], saved, patch, dispatchedDraft?.[part]?.fields || {}));
+    }
     return { ...currentDrafts, active };
   });
   const discardDetail = (id) => setDrafts((currentDrafts) => ({
-    ...currentDrafts, active: replaceDraftPart(replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", {}), id, "hold", {}), id, "owner", { fields: {} }),
+    ...currentDrafts, active: replaceDraftPart(replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", { fields: {} }), id, "hold", {}), id, "owner", { fields: {} }),
   }));
-  const recoverOwnerDrafts = (refreshed) => setDrafts((currentDrafts) => {
+  const recoverDetailDrafts = (refreshed) => setDrafts((currentDrafts) => {
     let active = currentDrafts.active;
     for (const saved of refreshed) {
-      const ownerDraft = active[saved.id]?.owner;
-      if (ownerDraft && !ownerDraft.baseline.eTag && saved.eTag) {
-        active = replaceDraftPart(active, saved.id, "owner", acceptOwnerDraft(ownerDraft, saved, {}, {}));
+      for (const part of ["detail", "owner"]) {
+        const draft = active[saved.id]?.[part];
+        if (draft && !draft.baseline.eTag && saved.eTag) active = replaceDraftPart(active, saved.id, part, acceptDetailDraft(draft, saved, {}, {}));
       }
     }
     return active === currentDrafts.active ? currentDrafts : { ...currentDrafts, active };
@@ -2102,7 +2092,7 @@ export default function App({
   };
   const acceptIssue = (saved) => {
     setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
-    recoverOwnerDrafts([saved]);
+    recoverDetailDrafts([saved]);
     setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
@@ -2122,7 +2112,7 @@ export default function App({
     if (patch.status === "Closed" && pendingOperations.current.has(id)) {
       throw new Error("Wait for this issue's pending work to finish before closing. Try closing again once it finishes.");
     }
-    const dispatchedOwner = drafts.active[id]?.owner;
+    const dispatchedDraft = drafts.active[id];
     return runIssueOperation(id, async () => {
       const previous = latestIssues.current?.find((issue) => issue.id === id);
       if (!previous) throw new Error("Issue is no longer available. Reload the register.");
@@ -2131,13 +2121,13 @@ export default function App({
       setSaveError("");
       try {
         const saved = await dataService.updateIssue(id, normalized, expectedETag || previous.eTag);
-        clearSubmittedDetail(id, normalized, saved, dispatchedOwner?.fields || {});
+        clearSubmittedDetail(id, normalized, saved, dispatchedDraft);
         return acceptIssue(saved);
       } catch (error) {
         if (error instanceof IssueRefreshError) {
-          clearSubmittedDetail(id, normalized, { ...(dispatchedOwner?.baseline || previous), ...normalized, eTag: undefined }, dispatchedOwner?.fields || {});
+          clearSubmittedDetail(id, normalized, { ...(dispatchedDraft?.owner?.baseline || dispatchedDraft?.detail?.baseline || previous), ...normalized, eTag: undefined }, dispatchedDraft);
           setIssues((items) => items.map((item) => item.id === id
-            ? { ...item, ...(normalized.status === "Closed" || profile === "owner" ? normalized : {}), eTag: undefined } : item));
+            ? { ...item, ...((previous.triaged && previous.status !== "Closed") || normalized.status === "Closed" || profile === "owner" ? normalized : {}), eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
         } else setSaveError(error instanceof Error ? error.message : String(error));
         throw error;
@@ -2145,31 +2135,34 @@ export default function App({
     });
   };
 
-  const clearSubmittedProgress = (id, text) => setDrafts((currentDrafts) => currentDrafts.active[id]?.progress?.trim() === text
+  const clearSubmittedProgress = (id, text) => setDrafts((currentDrafts) => currentDrafts.active[id]?.progress === text
     ? { ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, "progress", "") } : currentDrafts);
-  const addProgress = (id, entry) => runIssueOperation(id, async () => {
-    if (acceptedRef.current[`progress:${id}`]) throw new Error("This issue has an accepted update awaiting recovery. Reload saved data before posting another update.");
-    const current = latestIssues.current?.find((issue) => issue.id === id);
-    if (!current) throw new Error("Issue is no longer available. Reload the register.");
-    if (!current.eTag) throw new Error("Reload this issue before posting progress so its current state can be checked.");
-    if (issueIsReadOnly(current, profile, userEmail, userDisplayName)) throw new Error("This issue is read-only. Reload it before posting progress.");
-    const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
-    setSaveError("");
-    try {
-      const saved = await dataService.addProgressLogEntry(id, signedEntry);
-      clearSubmittedProgress(id, entry.text);
-      setIssues((items) => items.map((item) => item.id === id
-        ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
-      if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
-      return saved;
-    } catch (error) {
-      if (error instanceof AcceptedWriteError) {
-        clearSubmittedProgress(id, entry.text);
-        quarantine(`progress:${id}`, error, entry.text);
-      } else setSaveError(error instanceof Error ? error.message : String(error));
-      throw error;
-    }
-  });
+  const addProgress = (id, entry) => {
+    const dispatchedText = drafts.active[id]?.progress;
+    return runIssueOperation(id, async () => {
+      if (acceptedRef.current[`progress:${id}`]) throw new Error("This issue has an accepted update awaiting recovery. Reload saved data before posting another update.");
+      const current = latestIssues.current?.find((issue) => issue.id === id);
+      if (!current) throw new Error("Issue is no longer available. Reload the register.");
+      if (!current.eTag) throw new Error("Reload this issue before posting progress so its current state can be checked.");
+      if (issueIsReadOnly(current, profile, userEmail, userDisplayName)) throw new Error("This issue is read-only. Reload it before posting progress.");
+      const signedEntry = { ...entry, author: userDisplayName, authorEmail: userEmail };
+      setSaveError("");
+      try {
+        const saved = await dataService.addProgressLogEntry(id, signedEntry);
+        clearSubmittedProgress(id, dispatchedText);
+        setIssues((items) => items.map((item) => item.id === id
+          ? { ...item, progressLog: [...(item.progressLog || []), saved] } : item));
+        if (saved.saveWarning) setSaveWarning({ message: saved.saveWarning, issueId: id });
+        return saved;
+      } catch (error) {
+        if (error instanceof AcceptedWriteError) {
+          clearSubmittedProgress(id, dispatchedText);
+          quarantine(`progress:${id}`, error, entry.text);
+        } else setSaveError(error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    });
+  };
 
   // Flow B consumes accepted journal rows directly; no second write can make
   // an accepted comment appear failed and invite a duplicate submission.
@@ -2318,16 +2311,16 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (profile === "owner") {
       body = !readOnlyCurrent
-        ? <OwnerIssueDetail ownerDraft={drafts.active[current.id]?.owner || { baseline: current, fields: {} }} acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id, keepDraft) => reloadIssue(id, !keepDraft)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
+        ? <OwnerIssueDetail progressDraft={drafts.active[current.id]?.progress} ownerDraft={drafts.active[current.id]?.owner || { baseline: current, fields: {} }} acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id, keepDraft) => reloadIssue(id, !keepDraft)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
         : <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (isClosed) {
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
-        ? <QMIssueDetail acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />
+        ? <QMIssueDetail detailDraft={drafts.active[current.id]?.detail || { baseline: current, fields: {} }} progressDraft={drafts.active[current.id]?.progress} acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id, keepDraft) => reloadIssue(id, !keepDraft)} author={userDisplayName} onDraftChange={recordDraft} />
         : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} onDraftChange={recordDraft} />;
     }
-  } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
+  } else if (activeTab === "dashboard") body = <Dashboard issues={issues} dataService={dataService} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;
   else if (activeTab === "register") body = <Register issues={issues} onOpen={setOpenId} filter={regFilter} setFilter={setRegFilter} />;
   else if (activeTab === "reminders") body = <RemindersView issues={issues} />;

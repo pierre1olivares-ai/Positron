@@ -7,7 +7,8 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.configuration.security.SharePointAccessTokenProvider;
-
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
@@ -18,9 +19,6 @@ import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
-
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 
 class SharePointRestClientTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -108,7 +106,7 @@ class SharePointRestClientTest {
                 .andRespond(
                         withSuccess(
                                 "{\"d\":{\"Id\":8,\"Title\":\"New"
-                                    + " owner\",\"Email\":\"new@example.com\"}}",
+                                        + " owner\",\"Email\":\"new@example.com\"}}",
                                 MediaType.APPLICATION_JSON));
         assertEquals(8, client.ensureUser("new@example.com").id());
         server.verify();
@@ -126,7 +124,7 @@ class SharePointRestClientTest {
                             JsonNode payload = body(request);
                             assertEquals(
                                     "https://example.sharepoint.com/sites/q/Lists/Progress"
-                                        + " Log/issue-42",
+                                            + " Log/issue-42",
                                     payload.path("listItemCreateInfo")
                                             .path("FolderPath")
                                             .path("DecodedUrl")
@@ -246,7 +244,8 @@ class SharePointRestClientTest {
                                     MediaType.APPLICATION_JSON));
             server.expect(anything())
                     .andExpect(method(HttpMethod.GET))
-                    .andRespond(withSuccess("{\"d\":{\"Exists\":true}}", MediaType.APPLICATION_JSON));
+                    .andRespond(
+                            withSuccess("{\"d\":{\"Exists\":true}}", MediaType.APPLICATION_JSON));
             server.expect(anything())
                     .andExpect(method(HttpMethod.POST))
                     .andRespond(withStatus(status).body("malformed"));
@@ -338,6 +337,104 @@ class SharePointRestClientTest {
                                 "{\"d\":{\"results\":[],\"__next\":\"https://evil.invalid/collect\"}}",
                                 MediaType.APPLICATION_JSON));
         assertThrows(IllegalArgumentException.class, () -> client.getItems("Issues", ""));
+        server.verify();
+    }
+
+    @Test
+    void nativeVersionCollectionExhaustsEverySupportedEnvelopeWithDelegatedGet() {
+        String endpoint = BASE + "web/lists/GetByTitle('Issues')/items(42)/versions";
+        for (String key : java.util.List.of("__next", "odata.nextLink", "@odata.nextLink")) {
+            server.reset();
+            server.expect(requestTo(endpoint + "?$select=*"))
+                    .andExpect(method(HttpMethod.GET))
+                    .andExpect(
+                            header(
+                                    "Authorization",
+                                    org.hamcrest.Matchers.startsWith("Bearer caller-token-")))
+                    .andRespond(
+                            withSuccess(
+                                    "{\"d\":{\"results\":[{\"VersionId\":512,\"VersionLabel\":\"1.0\"}],\""
+                                            + key
+                                            + "\":\""
+                                            + endpoint
+                                            + "?$skiptoken=512\"}}",
+                                    MediaType.APPLICATION_JSON));
+            server.expect(requestTo(endpoint + "?$skiptoken=512"))
+                    .andExpect(method(HttpMethod.GET))
+                    .andRespond(
+                            withSuccess(
+                                    "{\"value\":[{\"VersionId\":1024,\"VersionLabel\":\"2.0\"}]}",
+                                    MediaType.APPLICATION_JSON));
+            var versions = client.getItemVersions("Issues", 42);
+            assertEquals(2, versions.size());
+            assertEquals("1.0", versions.get(0).get("VersionLabel"));
+            assertEquals(1024, versions.get(1).get("VersionId"));
+            server.verify();
+        }
+    }
+
+    @Test
+    void historyPagingFailureOrEscapingContinuationNeverReturnsPartialHistory() {
+        String endpoint = BASE + "web/lists/GetByTitle('Issues')/items(42)/versions";
+        for (String next :
+                java.util.List.of(
+                        "https://evil.example/versions",
+                        BASE + "web/lists/GetByTitle('Other')/items",
+                        endpoint + "?$select=*")) {
+            server.reset();
+            server.expect(requestTo(endpoint + "?$select=*"))
+                    .andRespond(
+                            withSuccess(
+                                    "{\"value\":[],\"@odata.nextLink\":\"" + next + "\"}",
+                                    MediaType.APPLICATION_JSON));
+            assertThrows(
+                    IllegalArgumentException.class, () -> client.getItemVersions("Issues", 42));
+            server.verify();
+        }
+        server.reset();
+        server.expect(requestTo(endpoint + "?$select=*"))
+                .andRespond(
+                        withSuccess(
+                                "{\"value\":[{\"VersionId\":512}],\"@odata.nextLink\":\""
+                                        + endpoint
+                                        + "?$skiptoken=512\"}",
+                                MediaType.APPLICATION_JSON));
+        server.expect(requestTo(endpoint + "?$skiptoken=512"))
+                .andRespond(withStatus(HttpStatus.FORBIDDEN));
+        assertThrows(HttpClientErrorException.class, () -> client.getItemVersions("Issues", 42));
+        server.verify();
+    }
+
+    @Test
+    void historyFollowsRelativeQueryContinuationWithoutLeavingItsCollection() {
+        String endpoint = BASE + "web/lists/GetByTitle('Issues')/items(42)/versions";
+        server.expect(requestTo(endpoint + "?$select=*"))
+                .andRespond(
+                        withSuccess(
+                                "{\"value\":[{\"VersionLabel\":\"1.0\"}],\"@odata.nextLink\":\"?$skiptoken=512\"}",
+                                MediaType.APPLICATION_JSON));
+        server.expect(requestTo(endpoint + "?$skiptoken=512"))
+                .andRespond(
+                        withSuccess(
+                                "{\"value\":[{\"VersionLabel\":\"2.0\"}]}",
+                                MediaType.APPLICATION_JSON));
+        assertEquals(2, client.getItemVersions("Issues", 42).size());
+        server.verify();
+    }
+
+    @Test
+    void ordinaryCollectionKeepsItsExistingConfiguredSitePagingBoundary() {
+        String canonical = BASE + "web/lists(guid'9b3a7be2-3488-44f2-98ca-2c733e7c94de')/items";
+        server.expect(requestTo(BASE + "web/lists/GetByTitle('Issues')/items?$top=2000"))
+                .andRespond(
+                        withSuccess(
+                                "{\"value\":[{\"Id\":1}],\"@odata.nextLink\":\""
+                                        + canonical
+                                        + "?$skiptoken=1\"}",
+                                MediaType.APPLICATION_JSON));
+        server.expect(requestTo(canonical + "?$skiptoken=1"))
+                .andRespond(withSuccess("{\"value\":[{\"Id\":2}]}", MediaType.APPLICATION_JSON));
+        assertEquals(2, client.getItems("Issues", "").size());
         server.verify();
     }
 }

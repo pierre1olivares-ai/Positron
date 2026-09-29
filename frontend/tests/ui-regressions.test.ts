@@ -66,8 +66,63 @@ function issue(overrides: Partial<IIssue> = {}): IIssue {
   };
 }
 
+function ControlledEditor({ component: Component, input }: { component: React.ElementType; input: any }): React.ReactElement {
+  const [saved, setSaved] = React.useState(input.issue);
+  const [draft, setDraft] = React.useState({ baseline: input.issue, fields: {} as Record<string, unknown> });
+  const [progress, setProgress] = React.useState("");
+  React.useEffect(() => {
+    setSaved(input.issue);
+    setDraft(current => Object.keys(current.fields).length ? current : { baseline: input.issue, fields: {} });
+  }, [input.issue]);
+  const accept = (value: IIssue, patch: Partial<IIssue>, dispatched: Record<string, unknown>) => {
+    setSaved(value);
+    setDraft(current => {
+      const fields = { ...current.fields };
+      for (const key of Object.keys(patch)) if (fields[key] === dispatched[key]) delete fields[key];
+      return { baseline: value, fields };
+    });
+  };
+  const onUpdate = async (id: number, patch: Partial<IIssue>, eTag: string) => {
+    const dispatched = draft.fields;
+    try {
+      const result = await input.onUpdate(id, patch, eTag);
+      accept(result, patch, dispatched);
+      return result;
+    } catch (error) {
+      if (error instanceof IssueRefreshError) accept({ ...draft.baseline, ...patch, eTag: undefined }, patch, dispatched);
+      throw error;
+    }
+  };
+  const submitProgress = async (...args: any[]) => {
+    const dispatched = progress;
+    try {
+      const result = await (Component === ProgressLog ? input.onAdd(...args) : input.onAddProgress(...args));
+      setProgress(current => current === dispatched ? "" : current);
+      return result;
+    } catch (error) {
+      if (error instanceof AcceptedWriteError) setProgress(current => current === dispatched ? "" : current);
+      throw error;
+    }
+  };
+  const onReload = async (id: number, keep: boolean) => {
+    const value = await input.onReload(id, keep);
+    setSaved(value);
+    setDraft(current => ({ baseline: value, fields: keep ? current.fields : {} }));
+    return value;
+  };
+  const onDraftChange = (id: number, part: string, value: any) => {
+    if (part === "progress") setProgress(value);
+    if (part === "detail" || part === "owner") setDraft(value);
+    input.onDraftChange?.(id, part, value);
+  };
+  return React.createElement(Component, { ...input, issue: saved, ownerDraft: draft, detailDraft: draft, text: progress, progressDraft: progress,
+    onUpdate, onReload, onAdd: submitProgress, onAddProgress: submitProgress,
+    onDraftChange: Component === ProgressLog ? setProgress : onDraftChange });
+}
+
 function render(component: React.ElementType, props: object): void {
-  act(() => { ReactDOM.render(React.createElement(component, props), container); });
+  const controlled = [QMIssueDetail, OwnerIssueDetail, ProgressLog].includes(component);
+  act(() => { ReactDOM.render(controlled ? React.createElement(ControlledEditor, { component, input: props }) : React.createElement(component, props), container); });
 }
 
 function field(label: string): HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement {
@@ -311,24 +366,24 @@ test("a conflict retains the QM draft until the explicit reload action", async (
   assert.equal(container.querySelector('[role="alert"]'), null);
 });
 
-test("a newly created fallback record can acquire its missing version before editing", async () => {
+test("a newly created fallback record can acquire its missing version while keeping a new draft", async () => {
   const fallback = issue({ eTag: undefined });
   const latest = issue({ followUp: "Saved during intake", eTag: '"7"' });
   let reloads = 0;
   const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
   render(QMIssueDetail, qmProps({
     issue: fallback,
-    onReload: async (id: number) => { assert.equal(id, fallback.id); reloads += 1; return latest; },
+    onReload: async (id: number, keepDraft: boolean) => { assert.equal(id, fallback.id); assert.equal(keepDraft, true); reloads += 1; return latest; },
     onUpdate: async (_id: number, patch: Partial<IIssue>, eTag: string) => { writes.push({ patch, eTag }); return { ...latest, ...patch, eTag: '"8"' }; },
   }));
   change("Follow up (Quality Team notes)", "Draft before recovery");
   assert.equal(button("Save changes").disabled, true);
   assert.equal(button("Start 2-month effectiveness test").disabled, true);
   assert.equal(writes.length, 0);
-  await click("Reload latest and discard draft");
+  await click("Reload latest and keep draft");
   assert.equal(reloads, 1);
-  assert.equal(field("Follow up (Quality Team notes)").value, "Saved during intake");
-  assert.equal(Array.from(container.querySelectorAll("button")).some(candidate => candidate.textContent === "Reload latest and discard draft"), false);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Draft before recovery");
+  assert.equal(hasButton("Reload latest and keep draft"), false);
   change("Follow up (Quality Team notes)", "Ready after recovery");
   await click("Save changes");
   assert.deepEqual(writes, [{ patch: { followUp: "Ready after recovery" }, eTag: '"7"' }]);
@@ -360,7 +415,7 @@ test("an owner can retry a failed test-start without losing the implementation d
   const date = addCalendarDays(todayDate(), -7);
   function OwnerHarness(): React.ReactElement {
     const [current, setCurrent] = React.useState(stored);
-    return React.createElement(OwnerIssueDetail, {
+    return React.createElement(ControlledEditor, { component: OwnerIssueDetail, input: {
       issue: current, owner: "Owner", onBack: () => undefined,
       onAddProgress: async () => { journalWrites += 1; },
       onUpdate: async (_id: number, patch: Partial<IIssue>) => {
@@ -369,7 +424,7 @@ test("an owner can retry a failed test-start without losing the implementation d
         setCurrent(stored);
         return stored;
       },
-    });
+    } });
   }
   render(OwnerHarness, {});
   change("Implementation date", date);
@@ -576,10 +631,9 @@ test("accepted update remains blocked after reopening until reload supplies a ne
   change("Follow up (Quality Team notes)", "Later note");
   assert.equal(button("Save changes").disabled, true);
   assert.equal(writes, 1);
-  await click("Reload latest and discard draft");
-  assert.equal(field("Follow up (Quality Team notes)").value, "Accepted note");
+  await click("Reload latest and keep draft");
+  assert.equal(field("Follow up (Quality Team notes)").value, "Later note");
   assert.equal(container.querySelector('[role="status"]'), null);
-  change("Follow up (Quality Team notes)", "Later note");
   await click("Save changes");
   assert.deepEqual(versions, ['"1"', '"2"']);
 });
@@ -1096,7 +1150,7 @@ for (const profile of ["qm", "owner"] as const) {
     await openIssue();
     assertFieldsDisabled(true);
     assert.equal(progressInput().disabled, true);
-    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Original note");
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Accepted note");
     await act(async () => { pending.resolve(); });
     assertFieldsDisabled(false);
     assert.equal(progressInput().disabled, false);
@@ -2602,5 +2656,167 @@ for (const operation of ["create", "progress"] as const) {
     assert.equal(window.sessionStorage.getItem(key), null);
     assert.equal(operation === "create" ? field("Short summary *").disabled : progressInput().disabled, false);
     assert.equal(writes, 0);
+  });
+}
+
+for (const outcome of ["rejected", "accepted", "accepted without readback"]) {
+  test(`QM detail ${outcome} across navigation retains the dispatched baseline and matching drafts`, async () => {
+    const original = issue({ transformedInto: "OFI", followUp: "Saved baseline" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) {
+        await pending.promise;
+        if (outcome === "accepted without readback") throw new IssueRefreshError(1);
+      }
+      return { ...original, ...patch, eTag: '"2"' };
+    } }, [original]);
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Draft A");
+    change("Due date", "2026-12-01");
+    writeProgress("Omitted independent note");
+    await click("Save changes"); await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Draft A");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Omitted independent note");
+    assertFieldsDisabled(true);
+    await act(async () => { if (outcome === "rejected") pending.reject(new Error("Rejected after navigation")); else pending.resolve(); });
+    assert.equal(writes.length, 1);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Draft A");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Omitted independent note");
+    if (outcome === "rejected") {
+      change("Escalation BU", "IT");
+      await click("Save changes");
+      assert.deepEqual(writes[1], { patch: { followUp: "Draft A", dueDate: "2026-12-01", ownerBU: "IT" }, eTag: original.eTag });
+    } else {
+      assert.equal(button("Save changes").disabled, true);
+      if (outcome === "accepted without readback") assert.ok(button("Reload latest and discard draft"));
+    }
+  });
+}
+
+for (const profile of ["qm", "owner"]) for (const outcome of ["rejected", "accepted", "quarantined"]) {
+  test(`${profile} progress ${outcome} remains visible or is consumed across a pending remount without retry`, async () => {
+    const pending = deferred<IProgressLogEntry>();
+    let calls = 0;
+    await renderApp({ addProgressLogEntry: async () => { calls++; return pending.promise; } }, [issue()], { profile, userDisplayName: "Owner", userEmail: `owner@example.com` });
+    await click("Issue register"); await openIssue();
+    writeProgress("Dispatched observation"); await click("Add update");
+    await click(profile === "owner" ? "Back to my tasks" : "Back to register"); await openIssue();
+    assert.equal(progressInput().value, "Dispatched observation");
+    assert.equal(progressInput().disabled, true);
+    await act(async () => {
+      if (outcome === "rejected") pending.reject(new Error("Append rejected after navigation"));
+      else if (outcome === "quarantined") pending.reject(new AcceptedWriteError("progress", { issueId: 1 }));
+      else pending.resolve({ id: 41, text: "Dispatched observation", author: "Owner", ts: new Date().toISOString() });
+    });
+    assert.equal(calls, 1);
+    assert.equal(progressInput().value, outcome === "rejected" ? "Dispatched observation" : "");
+    if (outcome === "rejected") {
+      writeProgress(`${progressInput().value} with more detail`);
+      assert.equal(progressInput().value, "Dispatched observation with more detail");
+    } else if (outcome === "quarantined") {
+      assert.equal(progressInput().disabled, true);
+      await click("Reload saved data");
+    } else assert.deepEqual(journalText(), ["Dispatched observation"]);
+  });
+}
+
+for (const outcome of ["accepted", "accepted without readback"]) {
+  test(`${outcome} consumes matching QM fields but preserves a newer controlled field after remount`, async () => {
+    const pending = deferred<IIssue>();
+    await renderApp({ updateIssue: () => pending.promise });
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Dispatched value");
+    change("Due date", "2026-12-01");
+    await click("Save changes"); await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").disabled, true);
+    act(() => { Simulate.change(field("Follow up (Quality Team notes)"), { target: { value: "Newer controlled value" } } as never); });
+    await act(async () => {
+      if (outcome === "accepted without readback") pending.reject(new IssueRefreshError(1));
+      else pending.resolve(issue({ followUp: "Dispatched value", dueDate: "2026-12-01", eTag: '"2"' }));
+    });
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer controlled value");
+    assert.equal(field("Due date").value, "2026-12-01");
+    await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer controlled value");
+  });
+}
+
+for (const profile of ["qm", "owner"]) test(`${profile} accepted append preserves a newer controlled note after remount`, async () => {
+  const pending = deferred<IProgressLogEntry>();
+  await renderApp({ addProgressLogEntry: () => pending.promise }, [issue()], { profile, userDisplayName: "Owner", userEmail: "owner@example.com" });
+  await click("Issue register"); await openIssue(); writeProgress("Dispatched"); await click("Add update");
+  await click(profile === "owner" ? "Back to my tasks" : "Back to register"); await openIssue();
+  assert.equal(progressInput().disabled, true);
+  act(() => { Simulate.change(progressInput(), { target: { value: "Newer observation" } } as never); });
+  await act(async () => { pending.resolve({ id: 42, text: "Dispatched", author: "Owner", ts: new Date().toISOString() }); });
+  assert.equal(progressInput().value, "Newer observation");
+  assert.deepEqual(journalText(), ["Dispatched"]);
+});
+
+for (const remountPending of [false, true]) {
+  test(`QM accepted readback failure reload keeps a newer draft ${remountPending ? "after pending remount" : "in place"}`, async () => {
+    let stored = issue();
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    let reads = 0;
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        if (writes.length === 1) await pending.promise;
+        stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+        if (writes.length === 1) throw new IssueRefreshError(stored.id);
+        return stored;
+      },
+      getIssue: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("Saved issue is still unavailable");
+        return stored;
+      },
+    }, [stored]);
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Accepted assessment");
+    change("Due date", "2026-12-01");
+    writeProgress("Independent unposted observation");
+    await click("Save changes");
+    if (remountPending) { await click("Back to register"); await openIssue(); }
+    assert.equal(field("Follow up (Quality Team notes)").disabled, true);
+    // A change delivered after dispatch must survive acceptance of the earlier value.
+    act(() => { Simulate.change(field("Follow up (Quality Team notes)"), { target: { value: "Newer assessment" } } as never); });
+    await act(async () => { pending.resolve(); });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].eTag, '"1"');
+    assert.equal(stored.followUp, "Accepted assessment");
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    assert.equal(hasButton("Reload latest and discard draft"), false);
+    await click("Reload latest and keep draft");
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    assert.equal(writes.length, 1);
+
+    stored = { ...stored, rootCause: "Fresh server analysis", eTag: '"remote-3"' };
+    await click("Reload latest and keep draft");
+    assert.equal(reads, 2);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(field("Root cause").value, "Fresh server analysis");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Independent unposted observation");
+    assert.equal(button("Save changes").disabled, false);
+    assert.equal(button("Add update").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    await click("Save changes");
+    assert.deepEqual(writes[1], { patch: { followUp: "Newer assessment" }, eTag: '"remote-3"' });
+    assert.equal(stored.rootCause, "Fresh server analysis");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(progressInput().value, "Independent unposted observation");
+    assert.equal(recoveryPanel(), null);
   });
 }

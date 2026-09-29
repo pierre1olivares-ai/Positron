@@ -61,6 +61,27 @@ paths:
         '500':
           $ref: '#/components/responses/Error'
       x-qstar-write-receipt: true
+  '/issues/{id}/history':
+    get:
+      operationId: getIssueHistory
+      summary: Read retained native versions for the current visible issue.
+      description: >-
+        Read-only history, including native field values and version metadata. Complete is false
+        if the snapshot changed during the read. Clients must validate shape, retained coverage,
+        version ordering and the snapshot ETag before using historical metrics. Does not establish
+        history for deleted/inaccessible items or unversioned administrative writes.
+      tags: [Issues]
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: Native retained history snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueHistory'
+        '500':
+          $ref: '#/components/responses/Error'
   '/issues/{id}':
     patch:
       operationId: updateIssue
@@ -280,6 +301,28 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
   schemas:
+    IssueHistory:
+      type: object
+      required: [issueId, current, versions, complete]
+      properties:
+        issueId:
+          type: integer
+          format: int64
+        eTag:
+          type: string
+        complete:
+          type: boolean
+        current:
+          type: object
+          additionalProperties: true
+          description: Native Id, Created, Modified, OData__UIVersionString, Triaged, TaskCreated and Status, without defaulted field values.
+        versions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: Exhausted native versions with VersionId, VersionLabel, Created, IsCurrentVersion and recorded fields. Unsupported or missing fields remain unknown.
+
     ProgressLogEntry:
       type: object
       required:

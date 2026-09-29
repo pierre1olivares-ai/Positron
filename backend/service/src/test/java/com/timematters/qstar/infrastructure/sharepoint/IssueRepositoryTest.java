@@ -242,4 +242,44 @@ class IssueRepositoryTest {
         assertEquals("PROGRESS_ACCESS_PENDING", error.code());
         verify(client, never()).appendInFolder(anyString(), anyString(), anyString());
     }
+
+    @Test
+    void historyPreservesNativeFieldsAndDetectsConcurrentRevisionChanges() {
+        var current = issue(42);
+        current.put("Created", "2025-12-01T00:00:00Z");
+        current.put("Modified", "2026-01-05T00:00:00Z");
+        current.put("OData__UIVersionString", "3.0");
+        var versions =
+                List.<Map<String, Object>>of(
+                        Map.of(
+                                "VersionId",
+                                1536,
+                                "VersionLabel",
+                                "3.0",
+                                "Created",
+                                "2026-01-05T00:00:00Z",
+                                "IsCurrentVersion",
+                                true,
+                                "Status",
+                                "In Progress"));
+        when(client.getItem(eq(properties.getIssuesListName()), eq(42L), anyString()))
+                .thenReturn(current);
+        when(client.getItemVersions(properties.getIssuesListName(), 42)).thenReturn(versions);
+        var result = repository.history(42);
+        assertEquals(true, result.get("complete"));
+        assertEquals("\"1\"", result.get("eTag"));
+        assertEquals(current, result.get("current"));
+        assertEquals(versions, result.get("versions"));
+        assertFalse(
+                ((Map<?, ?>) ((List<?>) result.get("versions")).getFirst()).containsKey("Triaged"));
+        var newer = new HashMap<>(current);
+        newer.put("__metadata", Map.of("etag", "\"2\""));
+        when(client.getItem(eq(properties.getIssuesListName()), eq(42L), anyString()))
+                .thenReturn(current, newer);
+        assertEquals(false, repository.history(42).get("complete"));
+        when(client.getItemVersions(properties.getIssuesListName(), 42))
+                .thenThrow(new IllegalStateException("History unavailable"));
+        assertThrows(IllegalStateException.class, () -> repository.history(42));
+        verify(client, never()).updateItem(anyString(), anyLong(), anyMap(), anyString());
+    }
 }

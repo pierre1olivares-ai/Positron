@@ -5,15 +5,16 @@ import { SharePointDataService } from "../src/webparts/qstarIssueManager/service
 import type { WebPartContext } from "@microsoft/sp-webpart-base";
 
 type Row = Record<string, any>;
-type Request = { method: string; path: string; body?: Row };
+type Request = { method: string; path: string; url: string; body?: Row };
 const site = "https://tenant.sharepoint.com/sites/quality";
 const root = "/sites/quality/Lists/Progress";
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 
-export function sharePointHttpHarness(initial: Row[] = []) {
+export function sharePointHttpHarness(initial: Row[] = [], relative = false) {
   const state = {
     issues: initial.map(row => ({ ...row })), progress: [] as Row[], requests: [] as Request[],
     reply: undefined as ((request: Request) => Response | Promise<Response>) | undefined,
+    readReply: undefined as ((request: Request) => Response | undefined),
     failReads: false, failProgressRead: false, nextId: 21,
   };
   const originalFetch = globalThis.fetch;
@@ -22,11 +23,13 @@ export function sharePointHttpHarness(initial: Row[] = []) {
     const path = decodeURIComponent(url.pathname);
     const method = init?.method || "GET";
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
-    const request = { method, path, body };
+    const request = { method, path, url: url.href, body };
     state.requests.push(request);
     const title = /getbytitle\('([^']+)'\)/i.exec(path)?.[1];
     const itemId = /\/items\((\d+)\)$/i.exec(path)?.[1];
     if (method === "GET") {
+      const reply = state.readReply?.(request);
+      if (reply) return reply;
       if (state.failReads) return json({ error: "Read unavailable" }, 403);
       if (path.endsWith("/_api/web")) return json({ Url: site });
       if (/getFolderByServerRelativePath/i.test(path)) return json({ Exists: true });
@@ -67,6 +70,6 @@ export function sharePointHttpHarness(initial: Row[] = []) {
     throw new Error(`Unexpected request: ${method} ${path}`);
   };
   const client = spfi(site).using(DefaultInit(), DefaultHeaders(), BrowserFetchWithRetry({ interval: 1, retries: 2 }), DefaultParse());
-  const service = new SharePointDataService({} as WebPartContext, undefined, undefined, undefined, client);
+  const service = relative ? new SharePointDataService({ pageContext: { web: { absoluteUrl: site } } } as WebPartContext) : new SharePointDataService({} as WebPartContext, undefined, undefined, undefined, client);
   return { service, state, restore: () => { globalThis.fetch = originalFetch; } };
 }

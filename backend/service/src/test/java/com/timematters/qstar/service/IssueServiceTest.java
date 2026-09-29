@@ -199,7 +199,7 @@ class IssueServiceTest {
     }
 
     @Test
-    void rejectedOrClosedIssueCannotReceiveProgress() {
+    void closedIssueCannotReceiveProgress() {
         Issue current = issue();
         current.setStatus("Closed");
         when(repository.findById(42)).thenReturn(current);
@@ -228,5 +228,66 @@ class IssueServiceTest {
                 patch,
                 Clock.fixed(Instant.parse("2026-09-30T12:00:00Z"), ZoneId.of("Europe/Amsterdam")));
         assertEquals("2026-09-30", patch.get("closedDate"));
+    }
+
+    @Test
+    void rejectedOwnerCanUpdateProgressWithoutLosingFieldAndNativeIdentityRestrictions()
+            throws Exception {
+        Issue current = issue();
+        current.setStatus("Rejected");
+        current.setTaskCreated("No");
+        current.setTransformedInto("NC Minor");
+        when(repository.findById(42)).thenReturn(current);
+        when(users.currentUser())
+                .thenReturn(new CallerContext("owner", 7, "Owner", "owner@example.com"));
+        IssuePatchATO date =
+                json.readValue("{\"implementationDate\":\"2026-09-20\"}", IssuePatchATO.class);
+        service.updateIssue(42, date, "\"1\"");
+        verify(repository)
+                .update(
+                        eq(42L),
+                        eq(Map.of("implementationDate", "2026-09-20", "taskCreated", "No")),
+                        eq("\"1\""));
+        IssuePatchATO assignment = json.readValue("{\"taskOwnerId\":8}", IssuePatchATO.class);
+        assertThrows(
+                AccessDeniedException.class, () -> service.updateIssue(42, assignment, "\"1\""));
+        current.setTaskOwnerId(8L);
+        assertThrows(AccessDeniedException.class, () -> service.updateIssue(42, date, "\"1\""));
+        current.setTaskOwnerId(7L);
+        current.setStatus("Closed");
+        assertThrows(AccessDeniedException.class, () -> service.updateIssue(42, date, "\"1\""));
+        current.setStatus(IssueLifecycle.TEST);
+        assertThrows(AccessDeniedException.class, () -> service.updateIssue(42, date, "\"1\""));
+        verify(repository, times(1)).update(anyLong(), anyMap(), anyString());
+    }
+
+    @Test
+    void rejectedJournalAllowsManagersAndNativeOwnerButClosedAndUnauthorizedStillFail() {
+        Issue current = issue();
+        current.setStatus("Rejected");
+        when(repository.findById(42)).thenReturn(current);
+        var saved = new com.timematters.qstar.model.ProgressLogEntry();
+        saved.setId(91L);
+        saved.setText("Follow-up");
+        when(repository.append(eq(42L), eq("Follow-up"), any())).thenReturn(saved);
+        var input = new ProgressCreateATO();
+        input.setText("Follow-up");
+        for (String role : java.util.List.of("admin", "qm", "owner")) {
+            when(users.currentUser())
+                    .thenReturn(new CallerContext(role, 7, "Caller", "caller@example.com"));
+            assertEquals(91L, service.addProgressLogEntry(42, input).getId());
+        }
+        current.setStatus(IssueLifecycle.TEST);
+        assertEquals(91L, service.addProgressLogEntry(42, input).getId());
+        current.setStatus("Rejected");
+        current.setTaskOwnerId(8L);
+        assertThrows(AccessDeniedException.class, () -> service.addProgressLogEntry(42, input));
+        when(users.currentUser())
+                .thenReturn(new CallerContext("reader", 8, "Reader", "reader@example.com"));
+        assertThrows(AccessDeniedException.class, () -> service.addProgressLogEntry(42, input));
+        when(users.currentUser()).thenReturn(new CallerContext("qm", 7, "QM", "qm@example.com"));
+        current.setStatus("Closed");
+        assertThrows(IssueOperationException.class, () -> service.addProgressLogEntry(42, input));
+        verify(repository, times(4)).append(anyLong(), anyString(), any());
     }
 }

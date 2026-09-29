@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -107,17 +108,41 @@ public class SharePointRestClient {
     }
 
     public List<Map<String, Object>> getItems(String title, String query) {
-        var rows = new ArrayList<Map<String, Object>>();
-        String next =
+        return collection(
                 listPath(title)
                         + "/items"
-                        + (query.isEmpty() ? "?$top=2000" : "?" + query + "&$top=2000");
+                        + (query.isEmpty() ? "?$top=2000" : "?" + query + "&$top=2000"),
+                false);
+    }
+
+    public List<Map<String, Object>> getItemVersions(String title, long id) {
+        return collection(
+                listPath(title) + "/items(" + positive(id) + ")/versions?$select=*", true);
+    }
+
+    private List<Map<String, Object>> collection(String path, boolean pinCollection) {
+        var rows = new ArrayList<Map<String, Object>>();
+        var visited = new HashSet<URI>();
+        URI endpoint = uri(path);
+        String next = endpoint.toString();
         while (next != null) {
+            URI address = uri(next);
+            if ((pinCollection && !address.getPath().equals(endpoint.getPath()))
+                    || address.getFragment() != null
+                    || !visited.add(address)
+                    || visited.size() > 1000)
+                throw new IllegalArgumentException(
+                        "SharePoint pagination left the collection or did not complete.");
             JsonNode page = request(HttpMethod.GET, next, null, null, false);
             JsonNode values = page.has("results") ? page.get("results") : page.path("value");
             if (!values.isArray())
                 throw new IllegalStateException("SharePoint returned an invalid item collection.");
-            for (JsonNode row : values) rows.add(toMap(row));
+            for (JsonNode row : values) {
+                if (!row.isObject())
+                    throw new IllegalStateException(
+                            "SharePoint returned an invalid collection row.");
+                rows.add(toMap(row));
+            }
             next =
                     page.has("__next")
                             ? page.get("__next").asText()
@@ -126,6 +151,14 @@ public class SharePointRestClient {
                                     : page.has("@odata.nextLink")
                                             ? page.get("@odata.nextLink").asText()
                                             : null;
+            if (next != null) {
+                if (next.isBlank())
+                    throw new IllegalStateException("SharePoint pagination is incomplete.");
+                next =
+                        next.startsWith("?")
+                                ? address.toString().split("\\?", 2)[0] + next
+                                : address.resolve(next).toString();
+            }
         }
         return rows;
     }

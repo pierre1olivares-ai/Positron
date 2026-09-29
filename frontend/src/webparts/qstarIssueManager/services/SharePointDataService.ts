@@ -1,5 +1,5 @@
 import type { WebPartContext } from "@microsoft/sp-webpart-base";
-import { spfi, SPFI, SPFx } from "@pnp/sp";
+import { spfi, SPFI, SPFx, SPCollection } from "@pnp/sp";
 import { BrowserFetch, parseBinderWithErrorCheck, parseODataJSON } from "@pnp/queryable";
 import "@pnp/sp/webs";
 import "@pnp/sp/lists";
@@ -9,6 +9,7 @@ import "@pnp/sp/folders/web";
 import "@pnp/sp/folders/list";
 import type { IItems } from "@pnp/sp/items";
 
+import { IIssueHistory } from "../domain/issueHistory";
 import { IDataService } from "./IDataService";
 import { IIssue, IProgressLogEntry } from "../models/IIssue";
 import { ISettings, DEFAULT_SETTINGS, normalizeSettings } from "../models/ISettings";
@@ -57,6 +58,7 @@ export class SharePointDataService implements IDataService {
   private referenceOffset?: number;
   private progressRoot?: string;
   private webOrigin?: string;
+  private historySite?: string;
   private readonly snapshots = new Map<number, IIssue>();
 
   constructor(
@@ -66,6 +68,7 @@ export class SharePointDataService implements IDataService {
     siteUrl?: string,
     client?: SPFI
   ) {
+    this.historySite = siteUrl || context.pageContext?.web?.absoluteUrl;
     this.sp = client || (siteUrl
       ? spfi(siteUrl).using(SPFx(context))
       : spfi().using(SPFx(context)));
@@ -112,6 +115,35 @@ export class SharePointDataService implements IDataService {
     const progress = entries.filter((entry) => this.progressParentId(entry) === id)
       .map((entry) => this.toProgressEntry(entry)).sort((a, b) => a.ts.localeCompare(b.ts));
     return this.remember(this.toIssue(item as SPItem, progress));
+  }
+
+  public async getIssueHistory(id: number): Promise<IIssueHistory> {
+    if (!positiveId(id)) throw new Error("Invalid issue identity.");
+    const item = this.sp.web.lists.getByTitle(this.issuesListName).items.getById(id);
+    const read = (): Promise<Record<string, unknown>> => item.select("Id", "Created", "Modified", "OData__UIVersionString", "Triaged", "TaskCreated", "Status")();
+    const current = await read();
+    const first = SPCollection(item.versions).select("*").using(parseBinderWithErrorCheck(response => response.json()));
+    const endpoint = new URL(first.toRequestUrl(), this.historySite ? `${this.historySite.replace(/\/$/, "")}/` : undefined);
+    let query = first;
+    const visited = new Set<string>();
+    const versions: unknown[] = [];
+    for (;;) {
+      const url = query === first ? endpoint : new URL(query.toRequestUrl());
+      if (url.origin !== endpoint.origin || url.pathname !== endpoint.pathname || url.username || url.password || url.hash || visited.has(url.href) || visited.size >= 1000) throw new Error("Issue history pagination is unavailable.");
+      visited.add(url.href);
+      const raw = await query() as unknown as Record<string, unknown>;
+      const page = (raw?.d || raw) as Record<string, unknown>;
+      const rows = page?.results || page?.value;
+      if (!Array.isArray(rows)) throw new Error("Issue history has an unsupported shape.");
+      versions.push(...rows);
+      const next = page.__next ?? page["odata.nextLink"] ?? page["@odata.nextLink"];
+      if (next === undefined) break;
+      if (typeof next !== "string" || !next) throw new Error("Issue history pagination is incomplete.");
+      query = SPCollection([first, new URL(next, url).href]);
+    }
+    const after = await read();
+    const eTag = historyETag(current);
+    return { issueId: id, eTag, current, versions, complete: !!eTag && eTag === historyETag(after) && JSON.stringify(current) === JSON.stringify(after) };
   }
 
   public async createIssue(issue: Partial<IIssue>): Promise<IIssue> {
@@ -443,4 +475,9 @@ function httpStatus(error: unknown): number | undefined {
 
 function escapeOData(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+function historyETag(row: Record<string, unknown>): string | undefined {
+  const value = row["@odata.etag"] || row["odata.etag"] || (row.__metadata as { etag?: string } | undefined)?.etag;
+  return typeof value === "string" && value !== "*" ? value : undefined;
 }

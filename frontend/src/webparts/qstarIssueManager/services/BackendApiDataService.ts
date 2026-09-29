@@ -1,3 +1,4 @@
+import { IIssueHistory } from "../domain/issueHistory";
 import { IDataService } from "./IDataService";
 import { IIssue, IProgressLogEntry } from "../models/IIssue";
 import { ISettings, normalizeSettings } from "../models/ISettings";
@@ -31,6 +32,12 @@ export class BackendApiDataService implements IDataService {
     return this.remember(issue);
   }
 
+  public async getIssueHistory(id: number): Promise<IIssueHistory> {
+    const history = await backendJson(this.client, `/issues/${id}/history`) as IIssueHistory;
+    if (!history || history.issueId !== id || !Array.isArray(history.versions) || !history.current || typeof history.complete !== "boolean") throw new Error("Issue history is unavailable.");
+    return history;
+  }
+
   public async createIssue(issue: Partial<IIssue>): Promise<IIssue> {
     const response = await this.client.request("/issues", "POST", writableIssue(issue));
     if (!response.ok) throw await backendError(response);
@@ -39,9 +46,9 @@ export class BackendApiDataService implements IDataService {
       value = await response.json() as Partial<IIssue>;
       return this.remember(readIssue(value));
     } catch {
-      const issueId = positiveId(value?.id) ? value.id : locationId(response, /^\/issues\/([1-9]\d*)\/?$/);
+      const issueId = positiveId(value?.id) ? value?.id : locationId(response, /^\/issues\/([1-9]\d*)\/?$/);
       const qsNumber = Number(response.headers.get("X-QStar-Reference"));
-      throw new AcceptedWriteError("create", { issueId, qsNumber: positiveId(value?.qsNumber) ? value.qsNumber : positiveId(qsNumber) ? qsNumber : undefined });
+      throw new AcceptedWriteError("create", { issueId, qsNumber: positiveId(value?.qsNumber) ? value?.qsNumber : positiveId(qsNumber) ? qsNumber : undefined });
     }
   }
 
@@ -95,7 +102,7 @@ export class BackendApiDataService implements IDataService {
       const headerEntryId = entryHeader && /^[1-9]\d*$/.test(entryHeader) ? Number(entryHeader) : undefined;
       if ((response.headers.get("Location") && !locationEntryId) || (entryHeader && !positiveId(headerEntryId)) ||
           (locationEntryId && headerEntryId && locationEntryId !== headerEntryId)) throw new AcceptedWriteError("progress", { issueId: id });
-      const entryId = locationEntryId || headerEntryId || (positiveId(value?.id) ? value.id : undefined);
+      const entryId = locationEntryId || headerEntryId || (positiveId(value?.id) ? value?.id : undefined);
       throw new AcceptedWriteError("progress", { issueId: id, entryId });
     }
   }

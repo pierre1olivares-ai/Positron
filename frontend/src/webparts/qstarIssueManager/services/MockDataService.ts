@@ -1,3 +1,4 @@
+import { IIssueHistory } from "../domain/issueHistory";
 import { IDataService } from "./IDataService";
 import { IIssue, IProgressLogEntry } from "../models/IIssue";
 import { ISettings, DEFAULT_SETTINGS, normalizeSettings } from "../models/ISettings";
@@ -14,6 +15,7 @@ const OFFSET_KEY = "qstar:mock:reference-offset:v1";
  * list is available, so UI work isn't blocked on tenant access.
  */
 export class MockDataService implements IDataService {
+  private readonly histories = new Map<number, IIssueHistory>();
   public async loadIssues(): Promise<IIssue[]> {
     return this.readIssues();
   }
@@ -22,6 +24,8 @@ export class MockDataService implements IDataService {
     const current = this.readIssues();
     if (current.length && !replace) return current;
     const initialized = issues.map((issue) => ({ ...blankIssue(), ...issue, eTag: "1" }));
+    this.histories.clear();
+    initialized.forEach(issue => this.recordVersion(issue));
     this.persist(initialized);
     window.localStorage.setItem(OFFSET_KEY, String(initialized.reduce((max, issue) => Math.max(max, issue.qsNumber), 1000)));
     return this.readIssues();
@@ -51,6 +55,7 @@ export class MockDataService implements IDataService {
       qsNumber: offset + nextId,
       eTag: "1",
     };
+    this.recordVersion(created);
     all.push(created);
     this.persist(all);
     return created;
@@ -62,6 +67,8 @@ export class MockDataService implements IDataService {
     if (!previous) throw new Error(`Issue ${id} was not found.`);
     if (expectedETag && expectedETag !== previous.eTag) throw new IssueConflictError(id, previous);
     const updated = { ...previous, ...patch, id, qsNumber: previous.qsNumber, eTag: String(Number(previous.eTag) + 1) };
+    if (this.histories.get(id)?.eTag === previous.eTag) this.recordVersion(updated);
+    else this.histories.delete(id);
     const next = all.map((i) => (i.id === id ? updated : i));
     this.persist(next);
     return updated;
@@ -76,6 +83,25 @@ export class MockDataService implements IDataService {
     );
     this.persist(next);
     return saved;
+  }
+
+  public async getIssueHistory(id: number): Promise<IIssueHistory> {
+    const issue = await this.getIssue(id);
+    const history = this.histories.get(id);
+    return history && history.eTag === issue.eTag ? JSON.parse(JSON.stringify(history)) : { issueId: id, current: {}, versions: [], complete: false };
+  }
+
+  private recordVersion(issue: IIssue): void {
+    const previous = this.histories.get(issue.id);
+    const now = new Date().toISOString();
+    const label = `${issue.eTag}.0`;
+    const fields = { Triaged: issue.triaged ? "Yes" : "No", TaskCreated: issue.taskCreated, Status: issue.status || "" };
+    this.histories.set(issue.id, {
+      issueId: issue.id, eTag: issue.eTag, complete: true,
+      current: { Id: issue.id, Created: previous?.current.Created || now, Modified: now, OData__UIVersionString: label, ...fields },
+      versions: [...(previous?.versions || []).map(row => ({ ...(row as object), IsCurrentVersion: false })),
+        { VersionId: Number(issue.eTag) * 512, VersionLabel: label, Created: now, IsCurrentVersion: true, ...fields }],
+    });
   }
 
   public async loadSettings(): Promise<ISettings> {

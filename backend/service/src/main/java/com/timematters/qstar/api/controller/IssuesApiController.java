@@ -2,6 +2,7 @@ package com.timematters.qstar.api.controller;
 
 import com.timematters.qstar.api.model.IssueATO;
 import com.timematters.qstar.api.model.IssueCreateATO;
+import com.timematters.qstar.api.model.IssueHistoryATO;
 import com.timematters.qstar.api.model.IssuePatchATO;
 import com.timematters.qstar.api.model.ProgressCreateATO;
 import com.timematters.qstar.api.model.ProgressLogEntryATO;
@@ -83,6 +84,11 @@ public class IssuesApiController implements IssuesApi {
     @Override
     public ResponseEntity<ProgressLogEntryATO> getProgressEntry(Long id, Long entryId) {
         return ResponseEntity.ok(issues.getProgressEntry(id, entryId));
+    }
+
+    @Override
+    public ResponseEntity<IssueHistoryATO> getIssueHistory(Long id) {
+        return ResponseEntity.ok(issues.getIssueHistory(id));
     }
 
     private HttpHeaders versionHeaders(IssueATO issue) {
