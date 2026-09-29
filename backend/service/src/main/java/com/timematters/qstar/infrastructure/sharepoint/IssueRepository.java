@@ -195,7 +195,9 @@ public class IssueRepository {
         fallback.setAuthorEmail(caller.email());
         fallback.setTs("");
         fallback.setSaveWarning(
-                "Your update was posted. Reload its SharePoint-recorded time and details; do not post it again.");
+                id == null
+                        ? "Your update may have been posted. Reload the progress log and check before resubmitting."
+                        : "Your update was posted. Reload its SharePoint-recorded time and details; do not post it again.");
         return fallback;
     }
 

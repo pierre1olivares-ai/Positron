@@ -1114,14 +1114,12 @@ function replaceDraftPart(drafts, id, part, value) {
   return next;
 }
 
-function acceptOwnerDraft(draft, saved, patch) {
+function acceptOwnerDraft(draft, saved, patch, dispatchedFields) {
   const fields = { ...draft.fields };
-  const baseline = { ...draft.baseline, eTag: saved.eTag, status: saved.status };
   for (const key of Object.keys(patch)) {
-    if (fields[key] === patch[key]) delete fields[key];
-    baseline[key] = saved[key];
+    if (fields[key] === dispatchedFields[key]) delete fields[key];
   }
-  return { baseline, fields };
+  return { baseline: saved, fields };
 }
 
 function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
@@ -1825,12 +1823,12 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     try {
       normalized = buildIssueTransition(baseline, patch);
       const saved = await onUpdate(issue.id, normalized, baseline.eTag);
-      setLocalDraft(acceptOwnerDraft(draft, saved, normalized));
+      setLocalDraft((current) => acceptOwnerDraft(current, saved, normalized, fields));
       return true;
     }
     catch (failure) {
       setError(failure);
-      if (failure instanceof IssueRefreshError) setLocalDraft(acceptOwnerDraft(draft, { ...baseline, ...normalized, eTag: undefined }, normalized));
+      if (failure instanceof IssueRefreshError) setLocalDraft((current) => acceptOwnerDraft(current, { ...baseline, ...normalized, eTag: undefined }, normalized, fields));
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setReloadRequired(true);
       return false;
     } finally { setSaving(false); }
@@ -1839,7 +1837,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     setSaving(true);
     try {
       const saved = await onReload(issue.id, keepDraftOnReload);
-      setLocalDraft(keepDraftOnReload ? acceptOwnerDraft(draft, saved, {}) : { baseline: saved, fields: {} });
+      setLocalDraft((current) => keepDraftOnReload ? acceptOwnerDraft(current, saved, {}, {}) : { baseline: saved, fields: {} });
       setReloadRequired(false); setError("");
     }
     catch (failure) { setError(failure); }
@@ -2058,7 +2056,7 @@ export default function App({
   const recordDraft = (id, part, value) => setDrafts((currentDrafts) => ({
     ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, part, value),
   }));
-  const clearSubmittedDetail = (id, patch, saved) => setDrafts((currentDrafts) => {
+  const clearSubmittedDetail = (id, patch, saved, dispatchedOwnerFields) => setDrafts((currentDrafts) => {
     if (!currentDrafts.active[id]) return currentDrafts;
     let active = currentDrafts.active;
     for (const part of ["detail", "hold", "triage"]) {
@@ -2069,7 +2067,7 @@ export default function App({
       }
       active = replaceDraftPart(active, id, part, fields);
     }
-    if (active[id]?.owner) active = replaceDraftPart(active, id, "owner", acceptOwnerDraft(active[id].owner, saved, patch));
+    if (active[id]?.owner) active = replaceDraftPart(active, id, "owner", acceptOwnerDraft(active[id].owner, saved, patch, dispatchedOwnerFields));
     return { ...currentDrafts, active };
   });
   const discardDetail = (id) => setDrafts((currentDrafts) => ({
@@ -2080,7 +2078,7 @@ export default function App({
     for (const saved of refreshed) {
       const ownerDraft = active[saved.id]?.owner;
       if (ownerDraft && !ownerDraft.baseline.eTag && saved.eTag) {
-        active = replaceDraftPart(active, saved.id, "owner", acceptOwnerDraft(ownerDraft, saved, {}));
+        active = replaceDraftPart(active, saved.id, "owner", acceptOwnerDraft(ownerDraft, saved, {}, {}));
       }
     }
     return active === currentDrafts.active ? currentDrafts : { ...currentDrafts, active };
@@ -2124,6 +2122,7 @@ export default function App({
     if (patch.status === "Closed" && pendingOperations.current.has(id)) {
       throw new Error("Wait for this issue's pending work to finish before closing. Try closing again once it finishes.");
     }
+    const dispatchedOwner = drafts.active[id]?.owner;
     return runIssueOperation(id, async () => {
       const previous = latestIssues.current?.find((issue) => issue.id === id);
       if (!previous) throw new Error("Issue is no longer available. Reload the register.");
@@ -2132,13 +2131,13 @@ export default function App({
       setSaveError("");
       try {
         const saved = await dataService.updateIssue(id, normalized, expectedETag || previous.eTag);
-        clearSubmittedDetail(id, normalized, saved);
+        clearSubmittedDetail(id, normalized, saved, dispatchedOwner?.fields || {});
         return acceptIssue(saved);
       } catch (error) {
         if (error instanceof IssueRefreshError) {
-          clearSubmittedDetail(id, normalized, { ...previous, ...normalized, eTag: undefined });
+          clearSubmittedDetail(id, normalized, { ...(dispatchedOwner?.baseline || previous), ...normalized, eTag: undefined }, dispatchedOwner?.fields || {});
           setIssues((items) => items.map((item) => item.id === id
-            ? { ...item, ...(normalized.status === "Closed" ? normalized : {}), eTag: undefined } : item));
+            ? { ...item, ...(normalized.status === "Closed" || profile === "owner" ? normalized : {}), eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
         } else setSaveError(error instanceof Error ? error.message : String(error));
         throw error;

@@ -2375,6 +2375,7 @@ for (const readbackFails of [false, true]) {
       }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
       await click("Issue register"); await openIssue();
       const date = addCalendarDays(todayDate(), -3);
+      change("Status", "In Progress");
       change("Implementation date", date);
       await click("Put on hold");
       change("Reason for hold *", "Waiting for parts");
@@ -2407,20 +2408,161 @@ for (const readbackFails of [false, true]) {
       }
       assert.equal(stored.implementationDate, "");
       assert.equal(recoveryPanel(), null);
-      change("Status", "In Progress");
-      assert.equal(field("Implementation date").value, date);
+      const nextDate = addCalendarDays(todayDate(), -1);
+      change("Implementation date", nextDate);
+      assert.equal(field("Status").value, "On Hold");
       assert.equal(writes.length, 1);
       await click("Save progress");
       assert.equal(writes.length, 2);
       assert.equal(writes[1].eTag, '"2"');
-      assert.equal(writes[1].patch.implementationDate, date);
-      assert.equal(writes[1].patch.status, "In Progress");
-      assert.equal(field("Implementation date").value, date);
+      assert.deepEqual(writes[1].patch, { implementationDate: nextDate });
+      assert.equal(stored.status, "On Hold");
+      assert.equal(field("Implementation date").value, nextDate);
       assert.equal(button("Save progress").disabled, true);
       assert.equal(recoveryPanel(), null);
       assert.equal(reads, readbackFails ? 2 : 0);
     });
   }
+}
+
+async function requestOwnerHold(): Promise<void> {
+  await click("Put on hold");
+  change("Reason for hold *", "Waiting for parts");
+  change("Resume work on *", addCalendarDays(todayDate(), 7));
+  const confirms = Array.from(container.querySelectorAll("button")).filter(candidate => candidate.textContent === "Put on hold");
+  const confirm = confirms[confirms.length - 1];
+  assert.equal(confirm.disabled, false);
+  await act(async () => { Simulate.click(confirm); });
+}
+
+for (const readbackFails of [false, true]) {
+  test(`owner ${readbackFails ? "recovery" : "successful readback"} uses the fresh baseline when clearing a retained dirty date`, async () => {
+    let stored = issue({ status: "Created" });
+    const remoteDate = addCalendarDays(todayDate(), -10);
+    const draftDate = addCalendarDays(todayDate(), -3);
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    const remoteUpdate = () => { stored = { ...stored, implementationDate: remoteDate, eTag: '"remote-3"' }; };
+    let reads = 0;
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        stored = { ...stored, ...patch, eTag: '"2"' };
+        if (writes.length === 1) {
+          if (readbackFails) throw new IssueRefreshError(stored.id);
+          remoteUpdate();
+        }
+        return stored;
+      },
+      getIssue: async () => { reads += 1; return stored; },
+    }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+    await click("Issue register"); await openIssue();
+    change("Implementation date", draftDate);
+    await requestOwnerHold();
+    assert.equal(field("Implementation date").value, draftDate);
+    if (readbackFails) {
+      assert.equal(button("Save progress").disabled, true);
+      await click("Cancel");
+      remoteUpdate();
+      await click("Reload latest and keep draft");
+    }
+    assert.equal(field("Implementation date").value, draftDate);
+    assert.equal(field("Status").value, "On Hold");
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(stored.implementationDate, remoteDate);
+    await click("Back to my tasks"); await openIssue();
+    change("Implementation date", "");
+    assert.equal(field("Implementation date").value, "");
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Save progress");
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].eTag, '"remote-3"');
+    assert.deepEqual(writes[1].patch, { implementationDate: "" });
+    assert.equal(stored.status, "On Hold");
+    assert.equal(stored.implementationDate, "");
+    assert.equal(button("Save progress").disabled, true);
+    assert.equal(recoveryPanel(), null);
+    assert.equal(reads, readbackFails ? 1 : 0);
+  });
+}
+
+test("owner recovery adopts an untouched server date before starting effectiveness testing", async () => {
+  let stored = issue({ status: "Created" });
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  let reads = 0;
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      stored = { ...stored, ...patch, eTag: '"2"' };
+      if (writes.length === 1) throw new IssueRefreshError(stored.id);
+      return stored;
+    },
+    getIssue: async () => { reads += 1; return stored; },
+  }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+  await click("Issue register"); await openIssue();
+  change("Status", "In Progress");
+  await requestOwnerHold();
+  assert.equal(field("Status").value, "On Hold");
+  assert.equal(button("Save progress").disabled, true);
+  assert.equal(hasButton("Reload latest and keep draft"), false);
+  await click("Cancel");
+  change("Status", "In Progress");
+  const remoteDate = addCalendarDays(todayDate(), -10);
+  stored = { ...stored, implementationDate: remoteDate, eTag: '"remote-3"' };
+  await click("Reload latest and keep draft");
+  assert.equal(field("Status").value, "In Progress");
+  assert.equal(field("Implementation date").value, remoteDate);
+  assert.equal(button("Save progress").disabled, false);
+  await click("Back to my tasks"); await openIssue();
+  assert.equal(field("Implementation date").value, remoteDate);
+  assert.equal(writes.length, 1);
+  await click("Mitigation implemented — start 2-month test");
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].eTag, '"remote-3"');
+  assert.equal(writes[1].patch.status, "Under Testing/Revision");
+  assert.equal(writes[1].patch.implementationDate, remoteDate);
+  assert.equal(stored.implementationDate, remoteDate);
+  assert.equal(stored.status, "Under Testing/Revision");
+  assert.equal(reads, 1);
+  assert.equal(recoveryPanel(), null);
+});
+
+for (const readbackFails of [false, true]) {
+  test(`owner ${readbackFails ? "provisional" : "full"} acceptance preserves a later delivered draft edit`, async () => {
+    let stored = issue({ status: "Created" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        if (writes.length === 1) await pending.promise;
+        stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+        if (readbackFails && writes.length === 1) throw new IssueRefreshError(stored.id);
+        return stored;
+      },
+      getIssue: async () => stored,
+    }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+    await click("Issue register"); await openIssue();
+    const submittedDate = addCalendarDays(todayDate(), -3);
+    const newerDate = addCalendarDays(todayDate(), -1);
+    change("Implementation date", submittedDate);
+    await click("Save progress");
+    assert.equal(field("Implementation date").disabled, true);
+    act(() => { Simulate.change(field("Implementation date"), { target: { value: newerDate } } as never); });
+    await act(async () => { pending.resolve(); });
+    assert.equal(field("Implementation date").value, newerDate);
+    assert.equal(stored.implementationDate, submittedDate);
+    await click("Back to my tasks"); await openIssue();
+    if (readbackFails) await click("Reload latest and keep draft");
+    assert.equal(field("Implementation date").value, newerDate);
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Save progress");
+    assert.equal(writes[1].eTag, '"2"');
+    assert.deepEqual(writes.map(write => write.patch), [{ implementationDate: submittedDate }, { implementationDate: newerDate }]);
+    assert.equal(stored.implementationDate, newerDate);
+    assert.equal(button("Save progress").disabled, true);
+  });
 }
 
 for (const operation of ["create", "progress"] as const) {

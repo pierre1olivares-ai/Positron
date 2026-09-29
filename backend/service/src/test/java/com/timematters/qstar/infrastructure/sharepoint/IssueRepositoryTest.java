@@ -220,7 +220,9 @@ class IssueRepositoryTest {
         assertEquals(19L, result.getId());
         assertEquals(7L, result.getAuthorId());
         assertEquals("", result.getTs());
-        assertNotNull(result.getSaveWarning());
+        assertEquals(
+                "Your update was posted. Reload its SharePoint-recorded time and details; do not post it again.",
+                result.getSaveWarning());
         verify(client, times(1)).appendInFolder(anyString(), anyString(), anyString());
     }
 

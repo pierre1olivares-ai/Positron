@@ -235,30 +235,35 @@ class SharePointRestClientTest {
     }
 
     @Test
-    void malformed201AppendStillReturnsAnAcceptedReceiptWithoutRereading() {
-        server.expect(anything())
-                .andExpect(method(HttpMethod.GET))
-                .andRespond(
-                        withSuccess(
-                                "{\"d\":{\"RootFolder\":{\"ServerRelativeUrl\":\"/sites/q/Lists/Progress\"}}}",
-                                MediaType.APPLICATION_JSON));
-        server.expect(anything())
-                .andExpect(method(HttpMethod.GET))
-                .andRespond(withSuccess("{\"d\":{\"Exists\":true}}", MediaType.APPLICATION_JSON));
-        server.expect(anything())
-                .andExpect(method(HttpMethod.POST))
-                .andRespond(withStatus(HttpStatus.CREATED).body("malformed"));
-        var saved =
-                new IssueRepository(client, properties)
-                        .append(
-                                42,
-                                "Accepted",
-                                new SharePointUser(7, "Caller", "caller@example.com"));
-        assertNull(saved.getId());
-        assertEquals("Accepted", saved.getText());
-        assertEquals("", saved.getTs());
-        assertNotNull(saved.getSaveWarning());
-        server.verify();
+    void malformedSuccessAppendReturnsAnUncertainReceiptWithoutRereadingOrRetrying() {
+        for (HttpStatus status : new HttpStatus[] {HttpStatus.OK, HttpStatus.CREATED}) {
+            server.reset();
+            server.expect(anything())
+                    .andExpect(method(HttpMethod.GET))
+                    .andRespond(
+                            withSuccess(
+                                    "{\"d\":{\"RootFolder\":{\"ServerRelativeUrl\":\"/sites/q/Lists/Progress\"}}}",
+                                    MediaType.APPLICATION_JSON));
+            server.expect(anything())
+                    .andExpect(method(HttpMethod.GET))
+                    .andRespond(withSuccess("{\"d\":{\"Exists\":true}}", MediaType.APPLICATION_JSON));
+            server.expect(anything())
+                    .andExpect(method(HttpMethod.POST))
+                    .andRespond(withStatus(status).body("malformed"));
+            var saved =
+                    new IssueRepository(client, properties)
+                            .append(
+                                    42,
+                                    "Accepted",
+                                    new SharePointUser(7, "Caller", "caller@example.com"));
+            assertNull(saved.getId());
+            assertEquals("Accepted", saved.getText());
+            assertEquals("", saved.getTs());
+            assertEquals(
+                    "Your update may have been posted. Reload the progress log and check before resubmitting.",
+                    saved.getSaveWarning());
+            server.verify();
+        }
     }
 
     @Test
