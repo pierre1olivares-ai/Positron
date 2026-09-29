@@ -1,5 +1,6 @@
+export const ACCEPTED_RECEIPT_MESSAGE = "Your submission may have been saved, but its receipt could not be read. Reload saved data and check the register or progress log before resubmitting.";
+
 export interface IAcceptedReceipt {
-  message: string;
   submitted: string;
   issueId?: number;
   qsNumber?: number;
@@ -21,8 +22,9 @@ export function readAcceptedReceipts(key: string): AcceptedReceipts {
       const valid: AcceptedReceipts = {};
       Object.keys(parsed).forEach((operation) => {
         const receipt = parsed[operation];
-        if ((operation === "create" || /^progress:[1-9]\d*$/.test(operation)) && receipt &&
-            typeof receipt.message === "string" && typeof receipt.submitted === "string") valid[operation] = receipt;
+        if ((operation === "create" || /^progress:[1-9]\d*$/.test(operation)) && receipt && typeof receipt.submitted === "string") {
+          valid[operation] = { submitted: receipt.submitted, issueId: receipt.issueId, qsNumber: receipt.qsNumber, entryId: receipt.entryId };
+        }
       });
       memory.set(key, valid);
       return valid;

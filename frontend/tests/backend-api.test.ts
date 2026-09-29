@@ -145,7 +145,11 @@ test("progress header-only identity is recoverable and inconsistent receipts rem
     { "X-QStar-Entry-Id": "invalid", Location: "/issues/1/progress/72" },
   ]) {
     const h = harness(() => response(undefined, 201, headers, true));
-    await assert.rejects(h.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" }), AcceptedWriteError);
+    await assert.rejects(h.service.addProgressLogEntry(1, { text: "Saved", author: "", ts: "" }), (error: unknown) => {
+      assert.ok(error instanceof AcceptedWriteError);
+      assert.deepEqual(error.identity, { issueId: 1 });
+      return true;
+    });
     assert.equal(h.calls.length, 1);
   }
 });

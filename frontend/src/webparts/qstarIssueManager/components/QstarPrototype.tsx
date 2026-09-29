@@ -9,7 +9,7 @@ import { formatLocalDate, normalizeDateOnly, addCalendarDays, addCalendarMonths,
 import { buildIssueTransition, reopenIssuePatch } from "../domain/issueLifecycle";
 import { changedIssueFields } from "../domain/issueDraft";
 import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../services/issueErrors";
-import { readAcceptedReceipts, subscribeAcceptedReceipts, writeAcceptedReceipts } from "../domain/acceptedWriteRecovery";
+import { ACCEPTED_RECEIPT_MESSAGE, readAcceptedReceipts, subscribeAcceptedReceipts, writeAcceptedReceipts } from "../domain/acceptedWriteRecovery";
 import type { IQstarConnection } from "../models/IConnection";
 import "./QstarPrototype.scss";
 import {
@@ -970,7 +970,7 @@ export function ProgressLog({ entries, canAdd, author, onAdd, disabled = false, 
       <SectionTitle icon={ListChecks} right={<span className="inline-flex items-center gap-1 text-xs text-slate-400"><Lock size={12} />Timestamped · cannot be edited or deleted</span>}>Progress log</SectionTitle>
       {canAdd && (
         <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-          {acceptedReceipt && <p role="status" className="mb-2 text-sm text-amber-800">{acceptedReceipt.message} Submitted note: {acceptedReceipt.submitted}</p>}
+          {acceptedReceipt && <p role="status" className="mb-2 text-sm text-amber-800">{ACCEPTED_RECEIPT_MESSAGE} Submitted note: {acceptedReceipt.submitted}</p>}
           <TextArea disabled={disabled || saving || !!acceptedReceipt} value={text} onChange={(e) => { setText(e.target.value); onDraftChange?.(e.target.value); }} placeholder="What did you do? What are the next steps or blockers?" />
           <div className="mt-2 flex items-center justify-between">
             <span className="text-xs text-slate-400">Posting as {author} · {fmtDateTime(new Date())}</span>
@@ -1106,11 +1106,22 @@ function unsavedDetailFields(baseline, draft) {
 function replaceDraftPart(drafts, id, part, value) {
   const next = { ...drafts };
   const draft = { ...next[id] };
-  if (typeof value === "string" ? value.trim() : Object.keys(value).length) draft[part] = value;
+  const content = part === "owner" ? value.fields : value;
+  if (typeof content === "string" ? content.trim() : Object.keys(content).length) draft[part] = value;
   else delete draft[part];
   if (Object.keys(draft).length) next[id] = draft;
   else delete next[id];
   return next;
+}
+
+function acceptOwnerDraft(draft, saved, patch) {
+  const fields = { ...draft.fields };
+  const baseline = { ...draft.baseline, eTag: saved.eTag, status: saved.status };
+  for (const key of Object.keys(patch)) {
+    if (fields[key] === patch[key]) delete fields[key];
+    baseline[key] = saved[key];
+  }
+  return { baseline, fields };
 }
 
 function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
@@ -1121,11 +1132,11 @@ function issueIsReadOnly(issue, profile, userEmail, userDisplayName) {
 }
 
 function DraftRecovery({ draft, number, onDiscard }) {
-  const fields = { ...draft.detail, ...draft.hold };
+  const fields = { ...draft.detail, ...draft.owner?.fields, ...draft.triage, ...draft.hold };
   return (
     <section aria-label="Unsaved draft recovery" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
       <h3 className="text-sm font-bold text-amber-900">Unsaved draft recovery · {number}</h3>
-      <p className="mt-1 text-sm text-amber-900">This copy was kept when the issue became read-only. It stays available for this session while you make new edits. Select and copy what you need, then discard it when no longer needed.</p>
+      <p className="mt-1 text-sm text-amber-900">This copy was kept when a saved change replaced your editor. It stays available for this session while you make new edits. Select and copy what you need, then discard it when no longer needed.</p>
       <dl className="mt-3 space-y-2 text-sm" style={{ userSelect: "text" }}>
         {Object.keys(fields).map((key) => <div key={key}><dt className="font-semibold">{DRAFT_FIELD_LABELS[key]}</dt><dd className="whitespace-pre-wrap">{fields[key] || "(Cleared)"}</dd></div>)}
         {draft.progress && <div><dt className="font-semibold">Unposted progress note</dt><dd className="whitespace-pre-wrap">{draft.progress}</dd></div>}
@@ -1368,18 +1379,30 @@ function TriageQueue({ issues, onOpen }) {
   );
 }
 
-export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = false }) {
+function triageDefaults(issue) {
+  return { transformedInto: "OFI", taskOwner: "", taskOwnerEmail: "", ownerBU: issue.departmentBU,
+    dueDate: addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity]), followUp: "" };
+}
+
+export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = false, onDraftChange }) {
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
   const [error, setError] = useState("");
   const [needsReload, setNeedsReload] = useState(!issue.eTag);
   const baseline = useRef(issue);
+  const cleanValues = useRef(triageDefaults(issue));
+  const accept = (patch) => {
+    for (const key of Object.keys(cleanValues.current)) {
+      if (Object.prototype.hasOwnProperty.call(patch, key)) cleanValues.current[key] = patch[key];
+    }
+  };
   const persist = async (patch) => {
     if (busy || needsReload) return;
     setSaving(true); setError("");
-    try { await onTriage(issue.id, patch, baseline.current.eTag); }
+    try { await onTriage(issue.id, patch, baseline.current.eTag); accept(patch); }
     catch (failure) {
       setError(failure);
+      if (failure instanceof IssueRefreshError) accept(patch);
       if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
     } finally { setSaving(false); }
   };
@@ -1389,18 +1412,19 @@ export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = fals
     catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
-  const [transformedInto, setT] = useState("OFI");
-  const [taskOwner, setOwner] = useState("");
-  const [taskOwnerEmail, setOwnerEmail] = useState("");
-  const [ownerBU, setBU] = useState(issue.departmentBU);
-  const [dueDate, setDue] = useState(addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity]));
-  const [followUp, setFollow] = useState("");
-  const dirty = transformedInto !== "OFI" || taskOwner || taskOwnerEmail || followUp ||
-    ownerBU !== baseline.current.departmentBU || dueDate !== addDays(baseline.current.reportDate, SEVERITY_DUE_DAYS[baseline.current.severity]);
+  const [draft, setDraft] = useState(() => triageDefaults(issue));
+  const { transformedInto, taskOwner, taskOwnerEmail, ownerBU, dueDate, followUp } = draft;
+  const edit = (key, value) => {
+    const next = { ...draft, [key]: value };
+    setDraft(next);
+    onDraftChange?.(issue.id, "triage", unsavedDetailFields(cleanValues.current, next));
+  };
+  const dirty = Object.keys(unsavedDetailFields(cleanValues.current, draft)).length > 0;
   useEffect(() => {
     if (!issueBusy && !dirty && issue !== baseline.current) {
       baseline.current = issue;
-      setBU(issue.departmentBU); setDue(addDays(issue.reportDate, SEVERITY_DUE_DAYS[issue.severity])); setNeedsReload(!issue.eTag);
+      cleanValues.current = triageDefaults(issue);
+      setDraft(triageDefaults(issue)); setNeedsReload(!issue.eTag);
     }
   }, [issue, issueBusy]);
   const nc = transformedInto === "NC Minor" || transformedInto === "NC Major";
@@ -1422,13 +1446,13 @@ export function TriageForm({ issue, onBack, onTriage, onReload, issueBusy = fals
           <Card className="p-4">
             <SectionTitle icon={ClipboardList}>Assess & decide</SectionTitle>
             <div className="space-y-3">
-              <Field label="Transform into"><Select disabled={busy} value={transformedInto} onChange={(e) => setT(e.target.value)} options={TRANSFORM_TYPES} /></Field>
+              <Field label="Transform into"><Select disabled={busy} value={transformedInto} onChange={(e) => edit("transformedInto", e.target.value)} options={TRANSFORM_TYPES} /></Field>
               {nc && <p className="rounded-lg bg-violet-50 px-3 py-2 text-xs text-violet-700">Nonconformity selected — §10.2 corrective-action fields will open on the issue once created.</p>}
-              <Field label="Task owner (gets reminders)"><TextInput disabled={busy} value={taskOwner} onChange={(e) => setOwner(e.target.value)} placeholder="Full name" /></Field>
-              <Field label="Task owner Microsoft 365 email"><TextInput disabled={busy} type="email" value={taskOwnerEmail} onChange={(e) => setOwnerEmail(e.target.value)} placeholder="owner@company.com" /></Field>
-              <Field label="Escalation BU"><Select disabled={busy} value={ownerBU} onChange={(e) => setBU(e.target.value)} options={BUSINESS_UNITS} /></Field>
-              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput disabled={busy} type="date" value={dueDate} onChange={(e) => setDue(e.target.value)} /></Field>
-              <Field label="Follow up note (optional)"><TextArea disabled={busy} value={followUp} onChange={(e) => setFollow(e.target.value)} /></Field>
+              <Field label="Task owner (gets reminders)"><TextInput disabled={busy} value={taskOwner} onChange={(e) => edit("taskOwner", e.target.value)} placeholder="Full name" /></Field>
+              <Field label="Task owner Microsoft 365 email"><TextInput disabled={busy} type="email" value={taskOwnerEmail} onChange={(e) => edit("taskOwnerEmail", e.target.value)} placeholder="owner@company.com" /></Field>
+              <Field label="Escalation BU"><Select disabled={busy} value={ownerBU} onChange={(e) => edit("ownerBU", e.target.value)} options={BUSINESS_UNITS} /></Field>
+              <Field label="Due date" hint={`Auto from ${issue.severity} severity (${SEVERITY_DUE_DAYS[issue.severity]}d) — override if needed`}><TextInput disabled={busy} type="date" value={dueDate} onChange={(e) => edit("dueDate", e.target.value)} /></Field>
+              <Field label="Follow up note (optional)"><TextArea disabled={busy} value={followUp} onChange={(e) => edit("followUp", e.target.value)} /></Field>
               <div className="flex flex-col gap-2 pt-1">
                 <Btn onClick={create} disabled={busy || needsReload}><CheckCircle2 size={15} />Create issue</Btn>
                 <Btn variant="danger" onClick={reject} disabled={busy || needsReload}><XCircle size={15} />Reject (no action)</Btn>
@@ -1509,7 +1533,7 @@ export function ReporterForm({ onSubmit, settings, reporterName, acceptedReceipt
         </div>
         <Field label="Additional comments (optional)"><TextArea disabled={submitting || !!acceptedReceipt} value={f.additionalComments} onChange={(e) => set("additionalComments", e.target.value)} /></Field>
         <Field label="Attachment" hint="Attachments are not supported by this form yet."><div className="flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-3 text-sm text-slate-400"><Paperclip size={15} />File upload unavailable</div></Field>
-        {acceptedReceipt && <p role="status" className="text-sm text-amber-800">{acceptedReceipt.message} Submitted report: {acceptedReceipt.submitted}</p>}
+        {acceptedReceipt && <p role="status" className="text-sm text-amber-800">{ACCEPTED_RECEIPT_MESSAGE} Submitted report: {acceptedReceipt.submitted}</p>}
         {submitError && !acceptedReceipt && <p className="text-sm text-rose-700">{submitError}</p>}
         <div className="flex justify-end pt-1"><Btn onClick={submit} disabled={!valid || submitting || !!acceptedReceipt}><Send size={15} />{submitting ? "Submitting…" : "Submit report"}</Btn></div>
         {!valid && <p className="text-right text-xs text-slate-400">Fields marked * are required.</p>}
@@ -1762,46 +1786,68 @@ function OwnerTasks({ issues, owner, ownerEmailAddress, onOpen }) {
   );
 }
 
-export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange, acceptedProgress }) {
-  const [baseline, setBaseline] = useState(issue);
+export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress, onReload, issueBusy = false, onDraftChange, acceptedProgress, ownerDraft }) {
+  const [localDraft, setLocalDraft] = useState({ baseline: issue, fields: {} });
+  const draft = ownerDraft || localDraft;
+  const { baseline, fields } = draft;
+  const status = fields.status ?? baseline.status;
+  const impl = fields.implementationDate ?? baseline.implementationDate ?? "";
   const [saving, setSaving] = useState(false);
   const busy = saving || issueBusy;
   const [error, setError] = useState("");
-  const [needsReload, setNeedsReload] = useState(!issue.eTag);
-  const [status, setStatus] = useState(issue.status);
-  const [impl, setImpl] = useState(issue.implementationDate || "");
+  const [reloadRequired, setReloadRequired] = useState(false);
+  const needsReload = reloadRequired || !baseline.eTag || !issue.eTag;
   const [holdOpen, setHoldOpen] = useState(false);
-  useEffect(() => { setBaseline(issue); setStatus(issue.status); setImpl(issue.implementationDate || ""); setNeedsReload(!issue.eTag); setError(""); }, [issue.id]);
-  const dirty = status !== baseline.status || impl !== (baseline.implementationDate || "");
+  useEffect(() => { setLocalDraft({ baseline: issue, fields: {} }); setReloadRequired(false); setError(""); }, [issue.id]);
   useEffect(() => {
-    if (!issueBusy && !dirty && issue !== baseline) {
-      setBaseline(issue); setStatus(issue.status); setImpl(issue.implementationDate || ""); setNeedsReload(!issue.eTag);
+    if (baseline.eTag) {
+      setReloadRequired(false);
+      setError((current) => current instanceof IssueRefreshError ? "" : current);
+    }
+  }, [baseline.eTag]);
+  const dirty = Object.keys(fields).length > 0;
+  const keepDraftOnReload = !baseline.eTag && dirty;
+  useEffect(() => {
+    if (!ownerDraft && !issueBusy && !dirty && issue !== baseline) {
+      setLocalDraft({ baseline: issue, fields: {} });
     }
   }, [issue, issueBusy]);
-  const accept = (saved) => { setBaseline(saved); setStatus(saved.status); setImpl(saved.implementationDate || ""); };
-  const record = (nextStatus, implementationDate) => onDraftChange?.(issue.id, "detail", unsavedDetailFields(
-    baseline, { ...baseline, status: nextStatus, implementationDate }
-  ));
+  const record = (key, value) => {
+    const next = { baseline, fields: { ...fields, [key]: value } };
+    if (value === (baseline[key] || "")) delete next.fields[key];
+    setLocalDraft(next);
+    onDraftChange?.(issue.id, "owner", next);
+  };
   const persist = async (patch) => {
     if (busy || needsReload) return false;
     setSaving(true); setError("");
-    try { accept(await onUpdate(issue.id, buildIssueTransition(baseline, patch), baseline.eTag)); return true; }
+    let normalized = patch;
+    try {
+      normalized = buildIssueTransition(baseline, patch);
+      const saved = await onUpdate(issue.id, normalized, baseline.eTag);
+      setLocalDraft(acceptOwnerDraft(draft, saved, normalized));
+      return true;
+    }
     catch (failure) {
       setError(failure);
-      if (failure instanceof IssueRefreshError) accept({ ...baseline, ...patch, eTag: undefined });
-      if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setNeedsReload(true);
+      if (failure instanceof IssueRefreshError) setLocalDraft(acceptOwnerDraft(draft, { ...baseline, ...normalized, eTag: undefined }, normalized));
+      if (failure instanceof IssueConflictError || failure instanceof IssueRefreshError) setReloadRequired(true);
       return false;
     } finally { setSaving(false); }
   };
   const reload = async () => {
     setSaving(true);
-    try { accept(await onReload(issue.id)); setNeedsReload(false); setError(""); }
+    try {
+      const saved = await onReload(issue.id, keepDraftOnReload);
+      setLocalDraft(keepDraftOnReload ? acceptOwnerDraft(draft, saved, {}) : { baseline: saved, fields: {} });
+      setReloadRequired(false); setError("");
+    }
     catch (failure) { setError(failure); }
     finally { setSaving(false); }
   };
   const nc = isNC(issue);
   const inTest = inNCTest(issue);
-  const ownerOpts = issue.status === "On Hold" ? ["On Hold", "Created", "In Progress"] : ["Created", "In Progress"];
+  const ownerOpts = baseline.status === "On Hold" ? ["On Hold", "Created", "In Progress"] : ["Created", "In Progress"];
   const putOnHold = async (holdReason, holdUntil) => { if (await persist({ status: "On Hold", holdReason, holdUntil })) setHoldOpen(false); };
   const implementMitigation = () => persist({ status: NC_TEST, implementationDate: impl || iso(today()) });
 
@@ -1809,7 +1855,7 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
     <div className="space-y-4">
       <button onClick={onBack} className="inline-flex items-center gap-1 text-sm font-medium text-slate-500 hover:text-slate-800"><ArrowLeft size={15} />Back to my tasks</button>
       <IssueSaveNotice error={error} />
-      {needsReload && <Btn onClick={reload} disabled={busy}>Reload latest and discard draft</Btn>}
+      {needsReload && <Btn onClick={reload} disabled={busy}>{keepDraftOnReload ? "Reload latest and keep draft" : "Reload latest and discard draft"}</Btn>}
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
@@ -1849,17 +1895,17 @@ export function OwnerIssueDetail({ issue, owner, onBack, onUpdate, onAddProgress
               </div>
             ) : nc ? (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => { setStatus(e.target.value); record(e.target.value, impl); }} options={ownerOpts} /></Field>
-                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={busy} type="date" value={impl} onChange={(e) => { setImpl(e.target.value); record(status, e.target.value); }} /></Field>
-                <Btn variant="ghost" onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || (status === baseline.status && impl === (baseline.implementationDate || ""))}><CheckCircle2 size={15} />Save progress</Btn>
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => record("status", e.target.value)} options={ownerOpts} /></Field>
+                <Field label="Implementation date" hint="When you put the corrective action in place"><TextInput disabled={busy} type="date" value={impl} onChange={(e) => record("implementationDate", e.target.value)} /></Field>
+                <Btn variant="ghost" onClick={() => persist(fields)} disabled={busy || needsReload || !dirty}><CheckCircle2 size={15} />Save progress</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <Btn variant="primary" disabled={busy || needsReload} onClick={implementMitigation} style={{ background: "#0891b2" }} className="hover:opacity-90"><FlaskConical size={15} />Mitigation implemented — start {NC_TEST_MONTHS}-month test</Btn>
                 <p className="text-xs text-slate-400">Marking the mitigation as implemented moves this NC into the {NC_TEST_MONTHS}-month effectiveness test. It can only be closed by the QM afterwards.</p>
               </div>
             ) : (
               <div className="space-y-3">
-                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => { setStatus(e.target.value); record(e.target.value, impl); }} options={ownerOpts} /></Field>
-                <Btn onClick={() => persist({ status, implementationDate: impl })} disabled={busy || needsReload || status === baseline.status}><CheckCircle2 size={15} />Save</Btn>
+                <Field label="Status"><Select disabled={busy} value={status} onChange={(e) => record("status", e.target.value)} options={ownerOpts} /></Field>
+                <Btn onClick={() => persist(fields)} disabled={busy || needsReload || !dirty}><CheckCircle2 size={15} />Save</Btn>
                 {issue.status !== "On Hold" && <Btn variant="ghost" disabled={busy || needsReload} onClick={() => setHoldOpen(true)}><Clock size={15} />Put on hold</Btn>}
                 <p className="text-xs text-slate-400">Closing and effectiveness verification are done by the Quality Team. Add a progress note to let them know when you're ready.</p>
               </div>
@@ -1939,7 +1985,7 @@ export default function App({
     writeAcceptedReceipts(recoveryKey, next);
   };
   const quarantine = (operation, error, submitted) => {
-    saveReceipts({ ...readAcceptedReceipts(recoveryKey), [operation]: { message: error.message, submitted, ...error.identity } });
+    saveReceipts({ ...readAcceptedReceipts(recoveryKey), [operation]: { submitted, ...error.identity } });
   };
   const recoverAcceptedWrites = async () => {
     if (recoveringAccepted) return;
@@ -1954,6 +2000,7 @@ export default function App({
         throw new Error("Issues changed during the reload. Wait for pending work to finish, then reload saved data again.");
       }
       setIssues(refreshed);
+      recoverOwnerDrafts(refreshed);
       const remaining = { ...readAcceptedReceipts(recoveryKey) };
       Object.keys(recoveringReceipts).forEach((key) => {
         if (remaining[key] === recoveringReceipts[key]) delete remaining[key];
@@ -1990,14 +2037,19 @@ export default function App({
   useEffect(() => {
     if (!issues) return;
     setDrafts((currentDrafts) => {
-      const readOnly = issues.filter((issue) => currentDrafts.active[issue.id] && issueIsReadOnly(issue, profile, userEmail, userDisplayName));
-      if (!readOnly.length) return currentDrafts;
-      const active = { ...currentDrafts.active };
+      const replaced = issues.filter((issue) => currentDrafts.active[issue.id] && (
+        issueIsReadOnly(issue, profile, userEmail, userDisplayName) || (issue.triaged && currentDrafts.active[issue.id].triage)
+      ));
+      if (!replaced.length) return currentDrafts;
+      let active = { ...currentDrafts.active };
       const archives = { ...currentDrafts.archives };
       let nextArchiveId = currentDrafts.nextArchiveId;
-      for (const issue of readOnly) {
-        archives[issue.id] = [...(archives[issue.id] || []), { id: nextArchiveId++, draft: active[issue.id] }];
-        delete active[issue.id];
+      for (const issue of replaced) {
+        const readOnly = issueIsReadOnly(issue, profile, userEmail, userDisplayName);
+        const draft = readOnly ? active[issue.id] : { triage: active[issue.id].triage };
+        archives[issue.id] = [...(archives[issue.id] || []), { id: nextArchiveId++, draft }];
+        if (readOnly) delete active[issue.id];
+        else active = replaceDraftPart(active, issue.id, "triage", {});
       }
       return { active, archives, nextArchiveId };
     });
@@ -2006,10 +2058,10 @@ export default function App({
   const recordDraft = (id, part, value) => setDrafts((currentDrafts) => ({
     ...currentDrafts, active: replaceDraftPart(currentDrafts.active, id, part, value),
   }));
-  const clearSubmittedDetail = (id, patch) => setDrafts((currentDrafts) => {
+  const clearSubmittedDetail = (id, patch, saved) => setDrafts((currentDrafts) => {
     if (!currentDrafts.active[id]) return currentDrafts;
     let active = currentDrafts.active;
-    for (const part of ["detail", "hold"]) {
+    for (const part of ["detail", "hold", "triage"]) {
       const fields = { ...currentDrafts.active[id][part] };
       for (const key of Object.keys(fields)) {
         const value = part === "hold" && key === "holdReason" ? fields[key].trim() : fields[key];
@@ -2017,11 +2069,22 @@ export default function App({
       }
       active = replaceDraftPart(active, id, part, fields);
     }
+    if (active[id]?.owner) active = replaceDraftPart(active, id, "owner", acceptOwnerDraft(active[id].owner, saved, patch));
     return { ...currentDrafts, active };
   });
   const discardDetail = (id) => setDrafts((currentDrafts) => ({
-    ...currentDrafts, active: replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", {}), id, "hold", {}),
+    ...currentDrafts, active: replaceDraftPart(replaceDraftPart(replaceDraftPart(currentDrafts.active, id, "detail", {}), id, "hold", {}), id, "owner", { fields: {} }),
   }));
+  const recoverOwnerDrafts = (refreshed) => setDrafts((currentDrafts) => {
+    let active = currentDrafts.active;
+    for (const saved of refreshed) {
+      const ownerDraft = active[saved.id]?.owner;
+      if (ownerDraft && !ownerDraft.baseline.eTag && saved.eTag) {
+        active = replaceDraftPart(active, saved.id, "owner", acceptOwnerDraft(ownerDraft, saved, {}));
+      }
+    }
+    return active === currentDrafts.active ? currentDrafts : { ...currentDrafts, active };
+  });
   const discardArchive = (id, archiveId) => setDrafts((currentDrafts) => ({
     ...currentDrafts, archives: { ...currentDrafts.archives, [id]: currentDrafts.archives[id].filter((archive) => archive.id !== archiveId) },
   }));
@@ -2041,6 +2104,7 @@ export default function App({
   };
   const acceptIssue = (saved) => {
     setIssues((items) => items.map((item) => item.id === saved.id ? saved : item));
+    recoverOwnerDrafts([saved]);
     setSaveWarning((warning) => saved.saveWarning ? { message: saved.saveWarning, issueId: saved.id } : warning?.issueId === saved.id ? null : warning);
     return saved;
   };
@@ -2068,11 +2132,11 @@ export default function App({
       setSaveError("");
       try {
         const saved = await dataService.updateIssue(id, normalized, expectedETag || previous.eTag);
-        clearSubmittedDetail(id, patch);
+        clearSubmittedDetail(id, normalized, saved);
         return acceptIssue(saved);
       } catch (error) {
         if (error instanceof IssueRefreshError) {
-          clearSubmittedDetail(id, patch);
+          clearSubmittedDetail(id, normalized, { ...previous, ...normalized, eTag: undefined });
           setIssues((items) => items.map((item) => item.id === id
             ? { ...item, ...(normalized.status === "Closed" ? normalized : {}), eTag: undefined } : item));
           setSaveWarning({ message: error.message, issueId: id });
@@ -2255,14 +2319,14 @@ export default function App({
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (profile === "owner") {
       body = !readOnlyCurrent
-        ? <OwnerIssueDetail acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id) => reloadIssue(id, true)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
+        ? <OwnerIssueDetail ownerDraft={drafts.active[current.id]?.owner || { baseline: current, fields: {} }} acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} owner={owner} onBack={back} onUpdate={ownerUpdateTask} onReload={(id, keepDraft) => reloadIssue(id, !keepDraft)} onAddProgress={ownerAddProgress} onDraftChange={recordDraft} />
         : <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} />;
     } else if (isClosed) {
       body = <ReadOnlyIssueDetail issue={current} issueBusy={issueBusy} onBack={back} onReload={reloadIssue} onReopen={() => reopen(current.id)} />;
     } else {
       body = current.triaged
         ? <QMIssueDetail acceptedProgress={acceptedReceipts[`progress:${current.id}`]} issue={current} issueBusy={issueBusy} onBack={back} onUpdate={updateIssue} onAddProgress={addProgress} onReload={(id) => reloadIssue(id, true)} author={userDisplayName} onDraftChange={recordDraft} />
-        : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} />;
+        : <TriageForm issue={current} issueBusy={issueBusy} onBack={back} onTriage={triage} onReload={reloadIssue} onDraftChange={recordDraft} />;
     }
   } else if (activeTab === "dashboard") body = <Dashboard issues={issues} />;
   else if (activeTab === "triage") body = <TriageQueue issues={issues} onOpen={setOpenId} />;
@@ -2322,7 +2386,7 @@ export default function App({
           {loadError && <div className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">Could not load Q-Star data: {loadError} <button className="ml-2 underline" onClick={() => setReloadToken((value) => value + 1)}>Retry</button></div>}
           {saveError && <div role="alert" className="mb-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-800">A Q-Star change failed and was not saved: {saveError}</div>}
           {Object.keys(acceptedReceipts).length > 0 && <div role="status" className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
-            A submission was saved, but its receipt could not be read. Do not submit that content again. Review the refreshed register or progress log before starting a fresh submission.
+            {ACCEPTED_RECEIPT_MESSAGE}
             <button disabled={recoveringAccepted} className="ml-2 underline" onClick={recoverAcceptedWrites}>{recoveringAccepted ? "Reloading saved data…" : "Reload saved data"}</button>
             {recoveryError && <p role="alert">Reload is still unavailable: {recoveryError}</p>}
           </div>}

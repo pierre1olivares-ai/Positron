@@ -1,5 +1,6 @@
 import { IIssue } from "../models/IIssue";
 import type { IAcceptedReceipt } from "../domain/acceptedWriteRecovery";
+import { ACCEPTED_RECEIPT_MESSAGE } from "../domain/acceptedWriteRecovery";
 
 export class AcceptedWriteError extends Error {
   public readonly saved = true;
@@ -9,7 +10,7 @@ export class AcceptedWriteError extends Error {
     public readonly operation: "create" | "progress",
     public readonly identity: Pick<IAcceptedReceipt, "issueId" | "qsNumber" | "entryId"> = {}
   ) {
-    super("Your submission was saved, but its receipt could not be read. Reload saved data before submitting anything else; do not submit the same content again.");
+    super(ACCEPTED_RECEIPT_MESSAGE);
     this.name = "AcceptedWriteError";
     (Object as ObjectConstructor & { setPrototypeOf(target: object, prototype: object): object })
       .setPrototypeOf(this, AcceptedWriteError.prototype);
