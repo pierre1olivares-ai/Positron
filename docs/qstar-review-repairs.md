@@ -29,20 +29,31 @@ Use the [tenant verification plan](../backend/sharepoint/connection-test-plan.md
 
 ## Evidence and limits
 
-The integration repairs passed 254 frontend tests, 54 Java tests, and ten
-provisioning tests. After the history lint cleanup, all 46 affected history and
-dashboard tests passed again. SPFx lint/type/Sass/webpack checks and the shipping
+The final local checks on 2026-09-30 passed 267 frontend tests, 57 Java tests, and ten
+provisioning tests, with no failures or skips. SPFx lint/type/Sass/webpack checks and the shipping
 bundle/package, OpenAPI generation, Java 21 compilation, Spotless, and the executable JAR
 build also passed. The legacy prototype component retains its file-level static
 check exemptions; its behavior is covered by interaction tests. The Java HTTP tests
 use signed synthetic tokens and mocked SharePoint/OBO endpoints; they do not
 establish tenant consent or access behavior.
 
+The last automated no-mistakes run (`01M3QBET8H805RC1AAX7896HYE`) committed its
+two recovery fixes as `26f1f854`, then stopped during re-review because its Codex
+CLI reached a usage limit. Its outcome is failed, not a completed gate pass.
+The preserved commit was recovered without dropping earlier commits. Local
+source review verified both fixes and their regressions, and the complete test,
+formatting and build checks above ran afterward. A one-line Java test-format
+correction was required for Spotless. No remote CI or deployment result is claimed.
+
 Local checks execute domain rules, React interactions, mocked SharePoint service contracts, and stateful provisioning command doubles, plus the SPFx lint/type/build/package tools. They do not authenticate against Microsoft 365. Power Automate flows are deployment instructions in this repository, not installed flow exports. Tenant ACL behavior, native PowerShell execution, flow delivery/retries, and real SharePoint round trips require the acceptance checks above.
 
 ## Retained dashboard history and navigation drafts
 
-QM detail and editable progress forms now use App-owned drafts, as owner detail already does. Navigating back and reopening an issue during a pending request retains the visible draft and its original clean baseline/ETag. Rejected requests leave that draft available for an explicit retry. Accepted requests consume only unchanged dispatched fields/text; newer edits, omitted fields and immutable recovery copies remain separate. There is no uncontrolled owner/QM/progress editor mode in production. Drafts and recovery copies remain in memory for this App session.
+Triage, QM detail and editable progress forms now use App-owned drafts, as owner detail already does. Navigating back and reopening an issue during a pending request retains the visible draft and its original clean baseline/ETag. Rejected requests leave that draft available for an explicit retry. Accepted requests consume only unchanged dispatched fields/text; newer edits, omitted fields and immutable recovery copies remain separate. There is no uncontrolled triage/owner/QM/progress editor mode in production. Drafts and recovery copies remain in memory for this App session.
+
+Explicit triage reload refreshes the clean baseline and ETag while retaining unsent fields. Still-untriaged items retain the default classification and calculated due date. Failed reloads leave the draft intact, and recovering another issue's receipt does not replace its original ETag.
+
+The backend now checks HTTP status before reading a mutation response body. If a known successful create or journal append has an unreadable response stream, it returns an accepted/uncertain receipt that prevents automatic resubmission, without inventing identity or audit details. Failures before a successful status and non-2xx responses remain errors. Successful MERGE operations do not read unused response bodies. HTTP regressions cover broken streams, absent identity headers, single-POST behavior, redirects, permission failures and version conflicts.
 
 The backend permits authorized progress updates and journal notes on Rejected issues, matching the direct client. Closed restrictions, native owner identity, owner field restrictions and journal-only access during effectiveness testing remain enforced.
 

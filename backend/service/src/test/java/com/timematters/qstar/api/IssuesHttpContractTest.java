@@ -63,8 +63,7 @@ class IssuesHttpContractTest {
                         json,
                         Clock.fixed(Instant.parse("2026-09-28T12:00:00Z"), ZoneOffset.UTC));
         return MockMvcBuilders.standaloneSetup(
-                        new IssuesApiController(
-                                service, new AuthorizationPolicy(users), "/api/v1"))
+                        new IssuesApiController(service, new AuthorizationPolicy(users), "/api/v1"))
                 .addPlaceholderValue("openapi.qStarIssueManager.base-path", "/api/v1")
                 .setControllerAdvice(new CustomExceptionHandler())
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(json))
