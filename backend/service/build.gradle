@@ -46,6 +46,8 @@ spotless {
 	}
 
 	java {
+		// Generated OpenAPI sources are reproducible outputs, not formatter inputs.
+		target 'src/*/java/**/*.java'
 		importOrder 'java', 'javax', 'org', 'com', 'com.timematters.', ''
 		removeUnusedImports()
 		googleJavaFormat('1.19.2').aosp()
@@ -95,7 +97,7 @@ dependencies {
 
 	implementation "com.azure.spring:spring-cloud-azure-starter-active-directory:$activeDirectoryVersion"
 	implementation "com.azure.spring:spring-cloud-azure-autoconfigure:$activeDirectoryVersion"
-	
+
 	implementation "org.flywaydb:flyway-core:$flywayVersion"
 	implementation "org.postgresql:postgresql:$postgresqlVersion"
 	implementation "org.jdbi:jdbi3-core:$jdbi3Version"
@@ -122,6 +124,7 @@ dependencies {
 	// The generated Api interfaces/ATOs use jakarta.validation.* (Spring Boot 3 /
 	// Jakarta EE) — also not wired up in the template as shipped.
 	implementation "org.springframework.boot:spring-boot-starter-validation"
+	implementation "org.openapitools:jackson-databind-nullable:0.2.6"
 
 	compileOnly "org.projectlombok:lombok:$lombokVersion"
 	annotationProcessor "org.mapstruct:mapstruct-processor:$mapstructVersion"
@@ -129,6 +132,7 @@ dependencies {
 	annotationProcessor "org.projectlombok:lombok-mapstruct-binding:$lombokMapstructBindingVersion"
 	developmentOnly "org.springframework.boot:spring-boot-devtools"
 	testImplementation "org.springframework.boot:spring-boot-starter-test"
+	testImplementation "org.springframework.security:spring-security-test"
 	testImplementation "io.zonky.test:embedded-database-spring-test:$embeddedDatabaseVersion"
 	testImplementation "io.zonky.test:embedded-postgres:$embeddedPostgresVersion"
 	testImplementation "org.flywaydb.flyway-test-extensions:flyway-spring-test:$flywaySpringTest"

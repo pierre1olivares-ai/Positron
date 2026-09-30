@@ -1,131 +1,169 @@
-# Q-Star Issue Manager — backend service
+# Q-Star Java backend
 
-Java/Spring Boot service scaffolded from time:matters' internal backend template
-(`backend-template-develop`, Sept 2026 share from IT). Service-layer architecture: Controller →
-Service → Repository, constructor-based dependency injection.
+This optional Java 21 / Spring Boot 3.3.4 API uses SharePoint as the data store.
+It is **disabled by default**. Direct SharePoint remains the SPFx default mode.
+Disabled startup and local tests require no tenant credentials, database, consent changes,
+container registry access or external telemetry.
 
-## Architecture: thin gateway in front of SharePoint
+## Permission and activation boundary
 
-**SharePoint remains the actual data store** — the "Q-Star Issues" and "Q-Star Progress Log"
-lists on the Quality site (see [`../sharepoint/qstar-sharepoint-graph-integration.md`](../sharepoint/qstar-sharepoint-graph-integration.md)).
-This service sits in front of it as an authenticated gateway:
+Do not enable this backend until IT verifies a **narrowly scoped delegated SharePoint REST
+permission grant** and completes the tenant acceptance checks below. The repository's
+single-site permission requirement still applies. A configured site URL limits this code's
+requests; it does not narrow an Entra permission grant.
 
+Microsoft documents delegated `Sites.Selected` for Graph, but that is not evidence that the
+same delegated permission is available for every SharePoint REST operation used here.
+The REST/CSOM guidance has different permission requirements. Do not promise or assume that
+Graph consent authorizes REST. If a narrow delegated REST configuration cannot be established,
+keep backend mode disabled and continue using the repaired direct SharePoint service.
+`AllSites.Write` is a broader delegated alternative, **not an approved setup step**: it requires
+an explicit user/IT exception to the single-site requirement. There is no automatic permission
+broadening, application-token fallback, or production consent script in this service.
+
+Sources: [selected permissions](https://learn.microsoft.com/en-us/graph/permissions-selected-overview),
+[delegated Sites.Selected announcement](https://devblogs.microsoft.com/microsoft365dev/sharepoint-now-supports-delegated-sites-selected-authentication/),
+[SharePoint REST/CSOM distinction](https://learn.microsoft.com/en-us/sharepoint/dev/sp-add-ins-modernize/use-remote-event-receivers-without-azure-acs-dependency).
+
+## Runtime identity and authorization
+
+```text
+SPFx -- API-audience delegated bearer --> Java API
+Java API -- OBO, signed-in caller's SharePoint token --> pinned SharePoint site
 ```
-SPFx web part ──(Azure AD bearer token)──▶ this backend ──(Graph, app identity, Sites.Selected)──▶ SharePoint
-```
 
-- The frontend authenticates callers via Azure AD (`configuration/security/WebSecurityConfig.java`,
-  OAuth2 resource server / JWT bearer).
-- `infrastructure/sharepoint/SharePointGraphClient.java` reads/writes the SharePoint lists via
-  Microsoft Graph, authenticating as this service's own app identity (client-credentials flow,
-  `Sites.Selected` — not the signed-in user's own SharePoint permissions).
-- The Postgres database wired up by the template (`QstarDatabase`, Flyway) exists only because
-  the template's boot sequence expects one — there's no Q-Star business data in it. See
-  `src/main/resources/db/migration/V1.0__Base.sql`.
+The resource server validates the JWT signature, timestamps, exact tenant/issuer and API
+audience. It requires the configured delegated scope (default `user_impersonation`) and a
+user object ID. App-only tokens are rejected. App-role values are an explicit allowlist;
+unknown or missing roles are read-only. Email and display name are never authorization keys.
+Raw group claims are not used, so group overage cannot grant a fallback role.
 
-## Naming (per the template's convention)
+`CurrentUserProvider` combines the verified API role with the delegated
+`/_api/web/currentuser` numeric identity, name and email. `/api/v1/me` returns this identity
+and the actual configured connection. The frontend must use this response in backend mode,
+not infer backend privileges from direct SharePoint groups or a mock user.
 
-- `Order.java` → internal model. `OrderATO.java` → what's serialized to/from the frontend
-  (generated from `api-contract/contract.yaml`). `OrderDAO.java` → JDBI data access.
-- Here: `Issue.java` / `IssueATO` (generated) / no DAO — `IssueRepository.java` talks to Graph
-  directly rather than JDBI, since SharePoint is the store, not Postgres.
+| API capability | Required role and additional checks |
+|---|---|
+| Read issues/settings, `/me` | Valid delegated API token and native SharePoint access |
+| Create issues | Admin or QM, plus native SharePoint write access |
+| Update issues / append progress | Admin/QM, or current owner with permitted owner fields/transitions |
+| Save settings / run diagnostics | Admin; SharePoint still enforces the caller's list permissions |
 
-## Building locally
+Role names do not override native SharePoint permissions. Owner checks use the freshly read
+issue's `TaskOwnerId` and the authoritative numeric caller ID. Journals append only in the
+secured `issue-<ID>` folder, and SharePoint supplies native `Author`/`Created`; caller-provided
+author, timestamps and parent metadata do not establish identity or journal membership.
+Keep provisioning and Flow C's item/folder permission reconciliation in place.
 
-Requires JDK 21 (this session used [Eclipse Temurin](https://adoptium.net/), installed to
-`~/java` with no admin rights needed — a system package manager works too) and no other local
-setup; Gradle wrapper handles the rest.
+The OBO client requests only `https://<configured-sharepoint-host>/.default`, using this API's
+confidential-client credential and the incoming caller assertion. The JWT-bearer provider is
+called directly and caches the resulting token only within the HTTP request. It does not use
+a global application token, an authorization-code session, or Graph as an alternate data path.
+The API never returns its downstream token. Consent/Conditional Access failures fail closed;
+affected callers may need to sign in again. Tenant acceptance must cover the organization's
+Conditional Access policy before enabling this mode.
+
+Microsoft references: [OBO flow](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow),
+[claim validation](https://learn.microsoft.com/en-us/entra/identity-platform/claims-validation),
+[Spring Cloud Azure security](https://learn.microsoft.com/en-us/azure/developer/java/spring-framework/spring-security-support).
+The implementation targets Azure Spring **5.17.1** and its
+[`spring.cloud.azure.active-directory` configuration](https://github.com/Azure/azure-sdk-for-java/blob/spring-cloud-azure_5.17.1/sdk/spring/spring-cloud-azure-autoconfigure/src/main/java/com/azure/spring/cloud/autoconfigure/implementation/aad/configuration/properties/AadAuthenticationProperties.java).
+It adds stricter tenant/issuer validation than that release's default validator.
+
+## Configuration
+
+Copy `local-envs.ps1.template` to a private ignored file if PowerShell is used. Keep secrets
+in the deployment secret store; do not put them in webpart properties, package files or Git.
+The API can use an OBO client secret or a registered PFX/P12 certificate. If a certificate path
+is configured, certificate authentication takes precedence. The mounted private key and
+password must remain accessible only to the service identity.
+
+| Environment variable | Meaning |
+|---|---|
+| `TM_QSTAR_BACKEND_ENABLED` | Default `false`; functional endpoints return 503 while disabled |
+| `TM_QSTAR_AD_TENANT_ID` | One tenant GUID; `common`/`organizations` are rejected |
+| `TM_QSTAR_AD_CLIENT_ID` | This API's application GUID and v2 audience |
+| `TM_QSTAR_AD_APP_ID_URI` | Optional exact v1 API audience, e.g. `api://<GUID>` |
+| `TM_QSTAR_API_SCOPE` | Required delegated API scope; default `user_impersonation` |
+| `TM_QSTAR_AD_CLIENT_SECRET` | OBO confidential-client secret, if certificate auth is not used |
+| `TM_QSTAR_AD_CERTIFICATE_PATH/PASSWORD` | OBO certificate file and private-key password |
+| `TM_QSTAR_ALLOWED_ORIGINS` | Comma-separated exact origins, normally `https://<tenant>.sharepoint.com` |
+| `TM_QSTAR_SP_SITE_URL` | One absolute HTTPS SharePoint site URL |
+| `TM_QSTAR_SP_SITE_HOSTNAME/SITE_PATH` | Legacy input, used only if `SITE_URL` is empty |
+| `TM_QSTAR_ISSUES_LIST/PROGRESS_LIST/CONFIG_LIST` | Defaults: Q-Star Issues / Q-Star Progress Log / Q-Star Config |
+| `TM_QSTAR_BETA_ACCESS_MODE` | Connection/profile description only; never relaxes API authorization |
+| `TM_QSTAR_ADMIN_ROLE/QM_ROLE/OWNER_ROLE/READER_ROLE` | Distinct app-role values; defaults `QStar.Admin`, `QStar.QM`, `QStar.Owner`, `QStar.Reader` |
+| `TM_QSTAR_BUGSNAG_ENABLED` | Default `false`; separate explicit telemetry opt-in |
+| `TM_QSTAR_BUGSNAG_KEY` | Required only when Bugsnag is deliberately enabled |
+
+CORS accepts exact origins, not wildcard tenant or hostname suffix patterns. Explicit
+localhost HTTP origins are available for local browser development. Production configuration
+should contain only approved HTTPS origins. Bearer requests do not require cookies.
+`ETag`, `Location`, `X-QStar-Reference` and `X-QStar-Entry-Id` are exposed so clients can
+recover an accepted operation without blindly repeating a POST.
+
+The old template's `MicrosoftGraphClient`, `UserRepository`, `UserService`, `QstarDatabase`
+and database migration examples remain unwired scaffolding. None is an active Spring service.
+Database/Flyway autoconfiguration is excluded because Q-Star does not use it. Reintroducing a
+database or app-only access requires a separate design change. HTTP body logging, Bugsnag and
+the template New Relic agent are not activated by default.
+
+## Local build and validation
+
+From `backend/service`, with JDK 21 on `JAVA_HOME`:
 
 ```bash
-export JAVA_HOME=/path/to/jdk-21
-./gradlew build          # runs OpenAPI codegen, compiles, packages the bootJar
-./gradlew bootRun         # needs a real Postgres + the TM_QSTAR_* env vars below to actually start
+bash ./gradlew --no-daemon test
+bash ./gradlew --no-daemon build
+bash ./gradlew --no-daemon bootRun
 ```
 
-`compileJava`/`build` succeed standalone (verified). `bootRun`/`test` need a live Postgres
-instance and real Azure AD / SharePoint credentials that don't exist yet — see "What's still
-needed" below.
+With the default configuration, `bootRun` starts a disabled API; `/api/v1/me` returns
+`503 BACKEND_DISABLED`. Tests use local mocks and synthetic credentials. They do not contact
+an Entra tenant or SharePoint, grant consent, run a provisioning script, publish an image,
+or deploy a flow/container. The suite covers role and ownership boundaries, delegated token
+requests, native journal mapping, ETag conflict handling, accepted-write receipts, CORS and
+default-disabled startup. These checks do not establish live tenant compatibility.
 
-### Required environment variables (`local-envs.ps1.template` → copy to `local-envs.ps1`)
+The REST contract is generated from `api-contract/contract.yaml` during compilation.
+Main endpoints use `/api/v1`: `GET /me`, `GET/POST /issues`, `GET/PATCH /issues/{id}`,
+`POST /issues/{id}/progress`, `GET/PUT /settings`, and `GET /diagnostics`.
+PATCH requires the caller's original `If-Match` ETag; 412 means reload before retrying.
+Accepted writes can return a saved receipt with a readback warning. Clients must keep the
+accepted identity and reconcile it rather than resubmit the mutation.
 
-| Variable | Purpose |
-|---|---|
-| `TM_QSTAR_DATASOURCE_URL/USERNAME/PASSWORD` | Postgres (template plumbing only, see above) |
-| `TM_QSTAR_AD_CLIENT_ID/SECRET/TENANT_ID` | Validates bearer tokens from the SPFx web part |
-| `TM_QSTAR_SP_CLIENT_ID/SECRET` | This service's own Graph app identity |
-| `TM_QSTAR_SP_SITE_HOSTNAME/SITE_PATH` | The Quality SharePoint site, e.g. `contoso.sharepoint.com` / `/sites/Quality` |
-| `TM_QSTAR_BUGSNAG_KEY` | Error tracking (optional) |
+## IT acceptance before activation
 
-The `TM_QSTAR_AD_*` and `TM_QSTAR_SP_*` credentials may end up being the same Entra app
-registration (granted both an exposed API scope and `Sites.Selected` application permissions) or
-two separate ones — either way an admin needs to create it/them and grant `Sites.Selected` write
-access to the Quality site (see the integration doc, §4.5).
+1. Preserve the single-site requirement. Verify the actual delegated **SharePoint REST**
+   scopes exposed by the tenant and their behavior for current-user lookup, list operations,
+   Person resolution, and folder-based append. Leave the backend disabled if a narrow grant
+   cannot satisfy these operations; seek an explicit decision before any broader proposal.
+2. Expose the API delegated scope, authorize the SPFx client through the tenant's normal
+   approval process, and configure API-audience token acquisition. Define the four app roles
+   for Users/Groups and assign them deliberately. Do not map group names into the roles claim.
+3. Configure the API credential, exact tenant/audience, approved origin and pinned site/list
+   names. Keep the existing production item/folder ACLs and immutable reference-offset setup.
+4. With separate Reader, Owner A, Owner B, QM and Admin accounts, verify denied cross-owner
+   writes, restricted owner fields, settings administration, reassignment/removal revocation,
+   and journal `Author`/`Created` fidelity. Confirm invalid issuer/audience/scope and application
+   tokens are rejected, and Conditional Access failures do not trigger application fallback.
+5. Verify a SharePoint-hosted SPFx page can make the authenticated CORS request. Exercise
+   stale ETags and an accepted write followed by failed readback without duplicate creation.
+6. Only after that acceptance, enable `TM_QSTAR_BACKEND_ENABLED` and select backend mode on
+   the intended webpart. Keep direct SharePoint available for the agreed coexistence period.
 
-## API
+No tenant acceptance, consent or deployment is performed by a local build or this repair.
 
-Defined in [`api-contract/contract.yaml`](api-contract/contract.yaml) (OpenAPI 3.0), generated
-into Java at build time — `IssuesApi`/`SettingsApi`/`DiagnosticsApi` interfaces plus `*ATO`
-models. Endpoints: `GET/PATCH/POST /issues*`, `GET/PUT /settings`, `GET /diagnostics` (this
-service's own SharePoint connectivity self-test — see `DiagnosticsService.java`).
+## Deployment artifacts
 
-## What was fixed in the template
+`azure-pipelines.yml` uses JDK 21 and builds in `backend/service`, with the matching Docker
+build context. It requires IT's Docker registry service connection and a valid `host`
+pipeline variable. The pipeline can build/push its image and publish a rendered manifest;
+it does not apply Kubernetes resources. Do not run it as part of local-only validation.
 
-This template zip hadn't been compiled end-to-end since being upgraded to Spring Boot 3.3.4 —
-building it surfaced several real gaps, all fixed here (not just worked around):
-
-- **Missing dependencies**: `com.remondis:remap` (the mapper classes' actual library — only
-  MapStruct was wired up, unused by any example code), `com.bugsnag:bugsnag`/`bugsnag-spring`,
-  `spring-boot-starter-validation`.
-- **`javax.*` → `jakarta.*`**: Spring Boot 3 requires Jakarta EE; the custom OpenAPI codegen
-  templates (`openApiTemplate/*.mustache`) and several hand-written files (`ApiUtil.java`,
-  `CustomExceptionHandler.java`, `CustomErrorController.java`) still imported `javax.validation`/
-  `javax.servlet`. Also added the generator's own `useJakartaEe: true` option.
-- **`AadResourceServerWebSecurityConfigurerAdapter` doesn't exist** in the
-  `spring-cloud-azure-starter-active-directory:5.17.1` version build.gradle declares (confirmed
-  by inspecting the actual jar) — rewritten against the real class,
-  `AadResourceServerHttpSecurityConfigurer`, in the modern Spring Security 6 `SecurityFilterChain`
-  bean style rather than the removed `WebSecurityConfigurerAdapter` inheritance style.
-  `UserRepository.java` similarly referenced the legacy `com.microsoft.azure.spring...UserPrincipal`
-  API instead of the `Jwt` principal the resource-server setup actually provides.
-  `AbstractErrorController`/`ErrorController.getErrorPath()` no longer exist either in Spring Boot
-  3 — `ErrorController` is now an empty marker interface.
-  `ResponseEntityExceptionHandler`'s overridable methods changed their status parameter from
-  `HttpStatus` to `HttpStatusCode`.
-- **Missing `interfaceOnly: true`**: without it, the generator also emits a concrete
-  `*ApiController` stubbed to `NOT_IMPLEMENTED` on every method, which collides with a
-  hand-written controller of the same name/interface once generated sources actually feed into
-  the build (they didn't before either — see next point). That's why the template's own
-  `SampleApiController.java` had to be a manually reconciled copy rather than something
-  regenerated on every build.
-- **Generated sources never reached the compiled classpath**: `openApiGenerate` wrote to
-  `build/generated` but nothing added that to `sourceSets` or ran it before `compileJava` — wired
-  up properly so the `Api` interfaces/`*ATO` models regenerate from the contract on every build.
-- **Hardcoded leftovers from a different real project** ("globaloffer", evidently what this
-  template was extracted from): a dead import in `model.mustache`
-  (`com.timematters.globaloffer.model.AbstractModel` — turned out `AbstractModel` itself is
-  real/load-bearing, just needed providing, see `model/AbstractModel.java`), a malformed line and
-  an unreferenced duplicate line in `local-envs.ps1.template`, a hardcoded property key
-  (`tm.go.bugsnag.api.key`), and stale config-map/port-name entries in `kubernetes.yaml`
-  referencing another project's files.
-- **`Error`/`ValidationError` response shape mismatch**: the original contract split these into
-  two schemas, but `CustomExceptionHandler`/`ValidationError.toErrorResponse()` always return
-  `ErrorATO` with a free-form `meta` bag — the contract's `ValidationError` response now points at
-  the same `Error` schema to match what the code actually returns.
-
-Full details and rationale are in code comments at each fix site, and in
-[`openApiTemplate/README.md`](openApiTemplate/README.md) for the codegen template fixes
-specifically.
-
-## What's still needed (not something I can do without your infra/access)
-
-1. **A real Postgres instance**, even though nothing Q-Star-specific lives in it yet.
-2. **Two Entra app registrations** (or one doing both jobs) — one for the SPFx web part to
-   request tokens against this API, one for this API's own Graph client-credentials calls with
-   `Sites.Selected` granted on the Quality site.
-3. **An Azure DevOps project** to actually run `azure-pipelines.yml`, and access to
-   `tmregistry.azurecr.io` (the `Dockerfile`'s base image is private to time:matters) — I can't
-   build/push the Docker image or deploy to Kubernetes from here.
-4. **A Kubernetes namespace** for `kubernetes.yaml`'s Deployment/Service/Ingress once the above
-   exist.
-
-Once 1–2 exist, `./gradlew test`/`bootRun` become runnable and worth trying before 3–4.
+`kubernetes.yaml` uses `networking.k8s.io/v1`, an explicit Prefix `/api` route and the declared
+service port. It preserves `/api/v1/...` when forwarding to Spring. TLS, ingress-nginx,
+namespace, secret/config-map contents and the private base image must be supplied by IT.
+The JVM uses a percentage of the container memory rather than a heap larger than its limit.
+The private base image, registry access and live cluster behavior remain deployment checks.

@@ -1,162 +1,284 @@
 openapi: 3.0.3
 info:
   title: Q-Star Issue Manager API
-  description: >
-    Thin authenticated gateway in front of the "Q-Star Issues" and
-    "Q-Star Progress Log" SharePoint lists. SharePoint remains the system
-    of record; this service validates the caller's Azure AD bearer token,
-    applies Q-Star's business rules, and proxies to SharePoint via
-    Microsoft Graph using its own application identity (Sites.Selected).
+  description: >-
+    Optional delegated gateway for the configured SharePoint site. SharePoint enforces the caller permissions.
+    Disabled until deployment acceptance.
   version: 1.0.0
 servers:
   - url: /api/v1
-
+security:
+  - bearerAuth: []
 paths:
   /issues:
     get:
       operationId: getIssues
       summary: Return the full issue register (all triaged and untriaged issues).
-      tags: [Issues]
+      tags:
+        - Issues
       responses:
-        "200":
+        '200':
           description: OK
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Issue"
-        "500":
-          $ref: "#/components/responses/Error"
+                  $ref: '#/components/schemas/Issue'
+        '500':
+          $ref: '#/components/responses/Error'
     post:
       operationId: createIssue
       summary: Create a new issue (intake).
-      tags: [Issues]
+      tags:
+        - Issues
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/IssueCreate"
+              $ref: '#/components/schemas/IssueCreate'
       responses:
-        "201":
-          description: Created
+        '201':
+          description: >-
+            Accepted. Returns persisted data or a warning receipt when identity/readback is unavailable. Never
+            repeat a confirmed 201 mutation.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Issue"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "500":
-          $ref: "#/components/responses/Error"
-
-  /issues/{id}:
-    patch:
-      operationId: updateIssue
-      summary: Partially update an issue (triage, status change, on-hold, close, etc).
+                $ref: '#/components/schemas/IssueCreateResult'
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Present only when the accepted identity is known.
+            X-QStar-Reference:
+              schema:
+                type: integer
+              description: Present only when the accepted identity is known.
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-qstar-write-receipt: true
+  '/issues/{id}/history':
+    get:
+      operationId: getIssueHistory
+      summary: Read retained native versions for the current visible issue.
+      description: >-
+        Read-only history, including native field values and version metadata. Complete is false
+        if the snapshot changed during the read. Clients must validate shape, retained coverage,
+        version ordering and the snapshot ETag before using historical metrics. Does not establish
+        history for deleted/inaccessible items or unversioned administrative writes.
       tags: [Issues]
       parameters:
-        - $ref: "#/components/parameters/IssueId"
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
+          description: Native retained history snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueHistory'
+        '500':
+          $ref: '#/components/responses/Error'
+  '/issues/{id}':
+    patch:
+      operationId: updateIssue
+      summary: 'Partially update an issue (triage, status change, on-hold, close, etc).'
+      tags:
+        - Issues
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - name: If-Match
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Original issue ETag. Wildcard is forbidden.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/IssuePatch"
+              $ref: '#/components/schemas/IssuePatch'
       responses:
-        "200":
+        '200':
+          description: 'Saved issue, or an accepted-write receipt when refresh failed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueWriteResult'
+          headers:
+            ETag:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/Error'
+        '412':
+          $ref: '#/components/responses/Error'
+        '428':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-qstar-write-receipt: true
+    get:
+      operationId: getIssue
+      summary: Reload one issue with its current ETag and protected-folder journal.
+      tags:
+        - Issues
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+      responses:
+        '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Issue"
-        "400":
-          $ref: "#/components/responses/ValidationError"
-        "404":
-          $ref: "#/components/responses/Error"
-        "500":
-          $ref: "#/components/responses/Error"
-
-  /issues/{id}/progress:
+                $ref: '#/components/schemas/Issue'
+          headers:
+            ETag:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/Error'
+  '/issues/{id}/progress':
     post:
       operationId: addProgressLogEntry
       summary: Append an entry to an issue's progress log (append-only).
-      tags: [Issues]
+      tags:
+        - Issues
       parameters:
-        - $ref: "#/components/parameters/IssueId"
+        - $ref: '#/components/parameters/IssueId'
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ProgressLogEntry"
+              $ref: '#/components/schemas/ProgressCreate'
       responses:
-        "201":
-          description: Created
+        '201':
+          description: >-
+            Accepted. Returns persisted data or a warning receipt when identity/readback is unavailable. Never
+            repeat a confirmed 201 mutation.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProgressLogEntry"
-        "404":
-          $ref: "#/components/responses/Error"
-        "500":
-          $ref: "#/components/responses/Error"
-
+                $ref: '#/components/schemas/ProgressCreateResult'
+          headers:
+            X-QStar-Entry-Id:
+              schema:
+                type: integer
+                format: int64
+              description: Present only when the accepted identity is known.
+            Location:
+              schema:
+                type: string
+              description: Present only when the accepted identity is known.
+        '404':
+          $ref: '#/components/responses/Error'
+        '500':
+          $ref: '#/components/responses/Error'
+      x-qstar-write-receipt: true
   /settings:
     get:
       operationId: getSettings
       summary: Read the IT-settings tab's configuration.
-      tags: [Settings]
+      tags:
+        - Settings
       responses:
-        "200":
+        '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Settings"
-        "500":
-          $ref: "#/components/responses/Error"
+                $ref: '#/components/schemas/Settings'
+        '500':
+          $ref: '#/components/responses/Error'
     put:
       operationId: saveSettings
       summary: Replace the IT-settings tab's configuration.
-      tags: [Settings]
+      tags:
+        - Settings
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Settings"
+              $ref: '#/components/schemas/Settings'
       responses:
-        "200":
+        '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Settings"
-        "500":
-          $ref: "#/components/responses/Error"
-
+                $ref: '#/components/schemas/Settings'
+        '500':
+          $ref: '#/components/responses/Error'
   /diagnostics:
     get:
       operationId: getDiagnostics
-      summary: >
-        Server-side connection self-test: confirms this service's own
-        Graph app-identity can reach the SharePoint site and both lists.
-        The frontend-side equivalent (ConnectionDiagnosticsService.ts)
-        checks the browser-to-backend leg; this checks the backend-to-
-        SharePoint leg.
-      tags: [Diagnostics]
+      summary: Administrator check of the delegated caller connection to the configured SharePoint site and lists.
+      tags:
+        - Diagnostics
       responses:
-        "200":
+        '200':
           description: OK
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/DiagnosticCheck"
-
+                  $ref: '#/components/schemas/DiagnosticCheck'
+  '/issues/{id}/progress/{entryId}':
+    get:
+      operationId: getProgressEntry
+      summary: Read a journal entry only if it belongs to the specified issue folder.
+      tags:
+        - Issues
+      parameters:
+        - $ref: '#/components/parameters/IssueId'
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgressLogEntry'
+        '404':
+          $ref: '#/components/responses/Error'
+  /me:
+    get:
+      operationId: getCurrentCaller
+      summary: 'Authoritative role, delegated SharePoint caller and configured connection.'
+      tags:
+        - Caller
+      responses:
+        '200':
+          description: Authenticated caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallerProfile'
+        '401':
+          $ref: '#/components/responses/Error'
+        '403':
+          $ref: '#/components/responses/Error'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Delegated Entra caller token for the configured backend audience and required scope.
   parameters:
     IssueId:
       name: id
@@ -165,82 +287,95 @@ components:
       schema:
         type: integer
         format: int64
-
   responses:
     Error:
       description: Unexpected error
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
-    # NOTE: validation errors are NOT a distinct response shape at runtime — see
-    # CustomExceptionHandler.java / ValidationError.java: every error, including
-    # constraint-violation ones, is built as GenericError and serialized via
-    # toErrorResponse() into the same Error/ErrorATO shape, with the field-level
-    # violations placed in Error's free-form `meta` object (as
-    # {"validationErrors": [...]}). This alias exists only so 400 responses in
-    # this contract can carry an intention-revealing name; it points at the same
-    # schema as Error rather than a separate ValidationErrorATO, to match.
+            $ref: '#/components/schemas/Error'
     ValidationError:
       description: Validation error (an Error whose meta.validationErrors holds the field-level violations)
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
-
+            $ref: '#/components/schemas/Error'
   schemas:
-    # NOTE: Severity/IssueStatus/TransformedInto/AlreadyInContact-style fields
-    # are deliberately plain `type: string` rather than JSON Schema `enum:`.
-    # openapi-generator's spring codegen turns an `enum:` constraint into a
-    # dedicated generated Java enum class (e.g. IssueStatusATO), which would
-    # no longer field-match the plain String properties on model.Issue that
-    # ReMap's SimpleATOMapper relies on for automatic mapping — trading a
-    # small amount of API-layer strictness for a mapper that works without
-    # per-field custom transforms. Valid values are documented here instead,
-    # and are still enforced by the underlying SharePoint Choice columns.
+    IssueHistory:
+      type: object
+      required: [issueId, current, versions, complete]
+      properties:
+        issueId:
+          type: integer
+          format: int64
+        eTag:
+          type: string
+        complete:
+          type: boolean
+        current:
+          type: object
+          additionalProperties: true
+          description: Native Id, Created, Modified, OData__UIVersionString, Triaged, TaskCreated and Status, without defaulted field values.
+        versions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+          description: Exhausted native versions with VersionId, VersionLabel, Created, IsCurrentVersion and recorded fields. Unsupported or missing fields remain unknown.
 
     ProgressLogEntry:
       type: object
-      required: [ts, author, text]
+      required:
+        - id
+        - text
+        - author
+        - ts
       properties:
         ts:
           type: string
+          description: 'Native SharePoint Created timestamp, or empty while accepted write readback is pending.'
         author:
           type: string
         text:
           type: string
-
-    # Field names deliberately mirror frontend/src/webparts/qstarIssueManager/models/IIssue.ts
-    # one-for-one so the SPFx data service needs no remapping.
+        id:
+          type: integer
+          format: int64
+        authorId:
+          type: integer
+          format: int64
+        authorEmail:
+          type: string
+        saveWarning:
+          type: string
     Issue:
       type: object
       required:
-        [
-          id,
-          qsNumber,
-          triaged,
-          taskCreated,
-          shortSummary,
-          description,
-          severity,
-        ]
+        - id
+        - qsNumber
+        - triaged
+        - taskCreated
+        - shortSummary
+        - description
+        - severity
       properties:
         id:
           type: integer
           format: int64
         qsNumber:
           type: integer
+          format: int64
         triaged:
           type: boolean
         status:
           type: string
-          description: "Created | In Progress | Under Testing/Revision | On Hold | Closed | Rejected"
+          description: Created | In Progress | Under Testing/Revision | On Hold | Closed | Rejected
         taskCreated:
           type: string
-          description: "Yes | No"
+          description: Yes | No
         transformedInto:
           type: string
-          description: "OFI | NC Minor | NC Major | Only sent to Dept/BU for Action"
+          description: OFI | NC Minor | NC Major | Only sent to Dept/BU for Action
         shortSummary:
           type: string
         description:
@@ -249,7 +384,7 @@ components:
           type: string
         severity:
           type: string
-          description: "Critical | High | Medium | Low"
+          description: Critical | High | Medium | Low
         createdBy:
           type: string
         reportDate:
@@ -260,7 +395,7 @@ components:
           type: string
         alreadyInContact:
           type: string
-          description: "Yes | No"
+          description: Yes | No
         deviationType:
           type: string
         issueOrigin:
@@ -305,22 +440,47 @@ components:
           type: array
           default: []
           items:
-            $ref: "#/components/schemas/ProgressLogEntry"
-
+            $ref: '#/components/schemas/ProgressLogEntry'
+        eTag:
+          type: string
+        saveWarning:
+          type: string
+        reminderCycle:
+          type: string
+        createdById:
+          type: integer
+          format: int64
+        createdByEmail:
+          type: string
+        taskOwnerId:
+          type: integer
+          format: int64
+        taskOwnerEmail:
+          type: string
+        verifiedById:
+          type: integer
+          format: int64
+        verifiedByEmail:
+          type: string
     IssueCreate:
       description: Fields supplied at intake; the rest default server-side.
       type: object
-      required: [shortSummary, description, severity]
+      required:
+        - shortSummary
+        - description
+        - severity
       properties:
         shortSummary:
           type: string
+          minLength: 1
         description:
           type: string
+          minLength: 1
         immediateAction:
           type: string
         severity:
           type: string
-          description: "Critical | High | Medium | Low"
+          description: Critical | High | Medium | Low
         createdBy:
           type: string
         reportDate:
@@ -331,64 +491,151 @@ components:
           type: string
         alreadyInContact:
           type: string
-          description: "Yes | No"
+          description: Yes | No
         deviationType:
           type: string
         issueOrigin:
           type: string
         additionalComments:
           type: string
-
+        createdById:
+          type: integer
+          format: int64
+        createdByEmail:
+          type: string
     IssuePatch:
       description: Any subset of Issue's mutable fields.
       type: object
       properties:
         triaged:
           type: boolean
+          nullable: true
         status:
           type: string
-          description: "Created | In Progress | Under Testing/Revision | On Hold | Closed | Rejected"
+          description: Created | In Progress | Under Testing/Revision | On Hold | Closed | Rejected
+          nullable: true
         taskCreated:
           type: string
-          description: "Yes | No"
+          description: Yes | No
+          nullable: true
         transformedInto:
           type: string
-          description: "OFI | NC Minor | NC Major | Only sent to Dept/BU for Action"
+          description: OFI | NC Minor | NC Major | Only sent to Dept/BU for Action
+          nullable: true
         followUp:
           type: string
+          nullable: true
         taskOwner:
           type: string
+          nullable: true
         ownerBU:
           type: string
+          nullable: true
         dueDate:
           type: string
+          nullable: true
         rootCause:
           type: string
+          nullable: true
         correctiveAction:
           type: string
+          nullable: true
         implementationDate:
           type: string
+          nullable: true
         effectivenessCheck:
           type: string
+          nullable: true
         verifiedBy:
           type: string
+          nullable: true
         verifiedDate:
           type: string
+          nullable: true
         closedDate:
           type: string
+          nullable: true
         closedAt:
           type: string
+          nullable: true
         holdReason:
           type: string
+          nullable: true
         holdUntil:
           type: string
+          nullable: true
         ownerUpdate:
           type: boolean
+          nullable: true
         ownerUpdateAt:
           type: string
+          nullable: true
         ownerUpdateText:
           type: string
-
+          nullable: true
+        shortSummary:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        immediateAction:
+          type: string
+          nullable: true
+        severity:
+          type: string
+          description: Critical | High | Medium | Low
+          nullable: true
+        createdBy:
+          type: string
+          nullable: true
+        reportDate:
+          type: string
+          nullable: true
+        departmentBU:
+          type: string
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        alreadyInContact:
+          type: string
+          description: Yes | No
+          nullable: true
+        deviationType:
+          type: string
+          nullable: true
+        issueOrigin:
+          type: string
+          nullable: true
+        additionalComments:
+          type: string
+          nullable: true
+        reminderCycle:
+          type: string
+          nullable: true
+        createdById:
+          type: integer
+          format: int64
+          nullable: true
+        createdByEmail:
+          type: string
+          nullable: true
+        taskOwnerId:
+          type: integer
+          format: int64
+          nullable: true
+        taskOwnerEmail:
+          type: string
+          nullable: true
+        verifiedById:
+          type: integer
+          format: int64
+          nullable: true
+        verifiedByEmail:
+          type: string
+          nullable: true
+      additionalProperties: false
     Settings:
       type: object
       properties:
@@ -396,24 +643,6 @@ components:
           type: string
         flowId:
           type: string
-        spSiteUrl:
-          type: string
-        spListName:
-          type: string
-        tenantId:
-          type: string
-        clientId:
-          type: string
-        connected:
-          type: boolean
-        lastTested:
-          type: string
-        access:
-          type: array
-          default: []
-          items:
-            $ref: "#/components/schemas/AccessEntry"
-
     AccessEntry:
       type: object
       properties:
@@ -421,8 +650,7 @@ components:
           type: string
         role:
           type: string
-          description: "admin | qm | owner | reader"
-
+          description: admin | qm | owner | reader
     DiagnosticCheck:
       type: object
       properties:
@@ -430,10 +658,9 @@ components:
           type: string
         status:
           type: string
-          description: "pass | warn | fail"
+          description: pass | warn | fail
         message:
           type: string
-
     Error:
       type: object
       properties:
@@ -449,8 +676,141 @@ components:
           type: string
         meta:
           description: >
-            Free-form bag for extra context. ValidationError.toErrorResponse()
-            puts field-level violations here as
-            {"validationErrors": [{field, message, rejectedValue}, ...]}.
+            Free-form bag for extra context. ValidationError.toErrorResponse() puts field-level violations
+            here as {"validationErrors": [{field, message, rejectedValue}, ...]}.
           type: object
           additionalProperties: true
+    ProgressCreate:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 63000
+    AcceptedWriteReceipt:
+      type: object
+      required:
+        - saved
+        - issueId
+        - saveWarning
+      properties:
+        saved:
+          type: boolean
+        issueId:
+          type: integer
+          format: int64
+        saveWarning:
+          type: string
+    IssueWriteResult:
+      oneOf:
+        - $ref: '#/components/schemas/Issue'
+        - $ref: '#/components/schemas/AcceptedWriteReceipt'
+    CallerProfile:
+      type: object
+      required:
+        - role
+        - source
+        - user
+        - connection
+      properties:
+        role:
+          type: string
+          description: admin | qm | owner | reader
+        source:
+          type: string
+          description: backend
+        user:
+          $ref: '#/components/schemas/CallerIdentity'
+        connection:
+          $ref: '#/components/schemas/BackendConnection'
+    CallerIdentity:
+      type: object
+      required:
+        - userId
+        - displayName
+        - email
+      properties:
+        userId:
+          type: integer
+          format: int64
+        displayName:
+          type: string
+        email:
+          type: string
+    BackendConnection:
+      type: object
+      required:
+        - siteUrl
+        - issuesListName
+        - progressListName
+        - configListName
+        - betaAccessMode
+      properties:
+        siteUrl:
+          type: string
+        issuesListName:
+          type: string
+        progressListName:
+          type: string
+        configListName:
+          type: string
+        betaAccessMode:
+          type: boolean
+    AcceptedIssueCreate:
+      type: object
+      description: >-
+        SharePoint accepted the mutation. The client must not retry it. Reload explicitly; a missing identity
+        must quarantine the submitted operation until reconciliation.
+      required:
+        - saveWarning
+      properties:
+        id:
+          type: integer
+          format: int64
+          nullable: true
+        qsNumber:
+          type: integer
+          format: int64
+          nullable: true
+        saveWarning:
+          type: string
+      additionalProperties: true
+    IssueCreateResult:
+      anyOf:
+        - $ref: '#/components/schemas/Issue'
+        - $ref: '#/components/schemas/AcceptedIssueCreate'
+    AcceptedProgressCreate:
+      type: object
+      description: >-
+        SharePoint accepted the mutation. The client must not retry it. Reload explicitly; a missing identity
+        must quarantine the submitted operation until reconciliation. An empty ts means native SharePoint
+        Created is not available yet.
+      required:
+        - text
+        - author
+        - ts
+        - saveWarning
+      properties:
+        id:
+          type: integer
+          format: int64
+          nullable: true
+        text:
+          type: string
+        author:
+          type: string
+        authorId:
+          type: integer
+          format: int64
+        authorEmail:
+          type: string
+        ts:
+          type: string
+        saveWarning:
+          type: string
+    ProgressCreateResult:
+      anyOf:
+        - $ref: '#/components/schemas/ProgressLogEntry'
+        - $ref: '#/components/schemas/AcceptedProgressCreate'

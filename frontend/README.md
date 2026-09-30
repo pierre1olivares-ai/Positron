@@ -1,49 +1,77 @@
 # Frontend — Q-Star Issue Manager web part
 
-An SPFx (SharePoint Framework) web part, scaffolded with the Yeoman generator (`@microsoft/generator-sharepoint`, SPFx 1.20, React, Node 18 LTS).
+Production SPFx 1.20 / React 17 web part for the validated Q-Star Issue Manager.
 
-- `prototype/` — the original validated React prototype (`qstar-issue-manager.jsx`) and its clickable demo (`qstar-live.html`). Reference source: the component UI has not yet been ported into the web part below.
-- `src/webparts/qstarIssueManager/` — the actual SPFx web part.
-  - `components/` — the React component (currently the SPFx boilerplate plus a working **Connection Diagnostics** panel; the prototype's full UI still needs porting in).
-  - `models/` — `IIssue.ts` / `ISettings.ts`, typed 1:1 with the prototype's data shapes so porting doesn't require reshaping data.
-  - `services/` — two data-layer implementations, both behind the same `IDataService` interface, switchable via the web part's **Data source** property:
-    - `BackendApiDataService.ts` — the target architecture: calls the Java backend ([`../backend/service/`](../backend/service/)) over an Azure-AD-secured connection (SPFx's `AadHttpClient`). The backend is a thin gateway to SharePoint, so from here it's just a JSON REST API. Needs the backend actually deployed and an Entra app registration to request tokens against — not usable yet.
-    - `SharePointDataService.ts` — talks to the `Q-Star Issues` / `Q-Star Progress Log` lists directly via SharePoint REST (PnPjs), using the signed-in user's own session. No backend deployment or Entra app registration needed — works as soon as the lists are provisioned. This is the practical default (`dataSourceMode: 'sharepoint'`) until the backend has somewhere to run.
-    - `MockDataService.ts` — localStorage-backed fallback for UI work in the Workbench before a real list exists.
-    - `ConnectionDiagnosticsService.ts` — SharePoint-direct self-test (site access, schema, choice values, indexes, a full write/delete round-trip).
-    - `BackendDiagnosticsService.ts` — backend-mode self-test: calls the backend's own `GET /diagnostics`, which proves both legs at once (frontend can reach the backend, and the backend can reach SharePoint).
-    - `fieldMap.ts` — single source of truth for SharePoint internal column names; keep in sync with the provisioning scripts and `backend/service/api-contract/contract.yaml`.
+## Implemented
 
-Both diagnostics services are wired to the same **Run Connection Test** button in the web part — whichever one matches the active `dataSourceMode`.
+- The complete validated prototype UI is ported to `components/QstarPrototype.tsx` and uses `IDataService`; production no longer uses `window.storage`.
+- `SharePointDataService.ts` reads and writes the `Q-Star Issues`, `Q-Star Progress Log`, and `Q-Star Config` lists through same-site SharePoint REST/PnPjs under the signed-in user's session.
+- Native SharePoint Person fields are selected/expanded into stable IDs, display names, and email addresses and are written via `FieldNameId` lookup values.
+- Issues and progress logs are read with PnPjs page iteration instead of a silent 5,000-row cap.
+- `SharePointRoleResolver.ts` maps the current user's SharePoint groups to Admin, Quality Manager, Task Owner, or Reader. Resolution is fail-closed; only localhost gets the explicit Admin development override.
+- Connection Diagnostics validates access, schema, choices, indexes, and a required-field-safe create/update/delete round trip with cleanup for both Lists.
+- Recharts, Lucide, and generated Tailwind utilities are bundled in the `.sppkg`; production loads no Tailwind CDN.
+- SharePoint direct remains the default. Local development in direct mode uses `MockDataService`; tenant direct mode uses `SharePointDataService`. Explicit backend mode uses `BackendApiDataService` in either environment.
+- The [integration contract](../backend/sharepoint/qstar-sharepoint-graph-integration.md#4-service-behavior) defines partial writes and version checks; the [provisioning guide](../backend/sharepoint/provisioning/README.md) owns reference allocation and journal upgrades.
+- See the [user guide](../README.md#working-with-issues) for lifecycle actions and [saving and draft recovery](../README.md#saving-and-recovering-drafts) for conflicts, busy controls, accepted-write warnings, and retained recovery copies.
+- Date-only values use calendar arithmetic and local formatting. SharePoint date envelopes are normalized for native date inputs and reminder comparisons.
+- Unit, service-contract, and real React interaction regressions live in `tests/`.
+- The Settings screen displays the actual connection. Direct mode uses the web-part site/list properties; backend mode uses the authoritative `/me` response. Changing mode, target, resource or identity remounts the app and resolves access again, while unrelated renders reuse the existing services.
 
-## Running locally
+The original source and standalone preview remain in `prototype/` as the requirements/reference baseline.
+The port in `QstarPrototype.tsx` currently disables ESLint and TypeScript checking with file-level directives; passing those checks does not establish that component's lint or type safety. Its interaction coverage is in `tests/ui-regressions.test.ts`.
+
+## Requirements
+
+- Node.js `>=18.17.1 <19.0.0`
+- A trusted SPFx development certificate for `gulp serve`
+- For tenant testing: a Q-Star development site provisioned for the selected [beta or production access model](../backend/sharepoint/provisioning/README.md)
+
+## Install, test, and build
+
+Run these commands from `frontend/` with the Node version required above:
 
 ```bash
-npm install
-npx gulp serve   # opens the local Workbench; for a real-tenant test, append --nobrowser
-                  # and open https://<tenant>.sharepoint.com/_layouts/15/workbench.aspx yourself
-```
-
-To build/package without serving:
-
-```bash
+npm ci
+npm test
 npx gulp bundle --ship
-npx gulp package-solution --ship   # produces sharepoint/solution/qstar-issue-manager.sppkg
+npx gulp package-solution --ship
 ```
 
-The `.sppkg` is what gets uploaded to the tenant's App Catalog for a real deployment.
+`npm test` regenerates the locally bundled utility stylesheet, runs the unit suite, then runs SPFx lint, TypeScript, Sass, and webpack checks.
 
-## Web part properties
+The deployable package is:
 
-- **Data source**: `sharepoint` (default) or `backend` — picks which data service/diagnostics pair above gets used.
-- SharePoint-direct mode: site URL (optional, defaults to the current site), issues/progress list names.
-- Backend mode: the backend's base URL (e.g. `https://qstar.time-matters.com/api/v1`) and its Azure AD App ID URI (to request an access token against).
+```text
+sharepoint/solution/qstar-issue-manager.sppkg
+```
 
-## What's left
+## Local development
 
-1. Port the prototype's UI (`prototype/qstar-issue-manager.jsx`) into `src/webparts/qstarIssueManager/components/QstarIssueManager.tsx`, replacing its `window.storage` calls with the `dataService` prop (already wired through from the web part, works for either data source mode).
-2. Remove the Tailwind CDN `<script>` tag present in the prototype — production bundles all styling locally (see the hard constraints in [`../CLAUDE.md`](../CLAUDE.md)). The scaffolded web part already uses SCSS modules, not Tailwind.
-3. Wire role resolution (Admin/QM/Owner/Reader) to Entra security groups instead of the prototype's in-app switcher.
-4. Before any of the above, either:
-   - provision the SharePoint lists (`backend/sharepoint/provisioning/`) and run through [`../backend/sharepoint/connection-test-plan.md`](../backend/sharepoint/connection-test-plan.md) using `dataSourceMode: 'sharepoint'`, or
-   - once IT stands up the infra `backend/service/README.md` lists as needed (Postgres, Entra app registrations, Azure DevOps/ACR, Kubernetes), deploy the backend and switch to `dataSourceMode: 'backend'`.
+```bash
+npx gulp trust-dev-cert   # one-time; macOS may request an administrator password
+npx gulp serve --nobrowser
+```
+
+Then open the tenant SharePoint Workbench with the debug-manifest query printed by `gulp serve`. Localhost uses mock data and a clearly marked development Admin role.
+
+## Tenant work remaining
+
+1. Provision a dedicated development site with `backend/sharepoint/provisioning/`.
+2. For beta, use the explicit beta provisioning entry point and enable **Beta access mode** in the web part properties. Existing site Owners map to Admin, Members/editors to Quality Manager, and read-only visitors to Reader.
+3. Run Connection Diagnostics in the real tenant.
+4. Build the assignment-permission, intake, and reminder flows from `backend/power-automate/qstar-power-automate-flows.md`.
+5. Validate whether nested Entra groups are enumerated through SharePoint; add the documented `MSGraphClientV3` fallback only if required.
+6. Run the role/permission/UAT checklist before App Catalog production deployment.
+
+Choose the entry point and review existing-data migrations in [the provisioning guide](../backend/sharepoint/provisioning/README.md).
+
+## Optional backend mode
+
+**Data source** defaults to `sharepoint`. Selecting `backend` is an explicit opt-in; configure an HTTPS API base URL and the Entra application ID/resource URI in the web-part properties. The server ships with `qstar.backend.enabled=false` and must remain disabled until the backend's local and tenant acceptance checklist is complete. See [the backend deployment guide](../backend/service/README.md) for delegated permissions, consent, exact tenant CORS origin and activation. No live tenant acceptance is implied by frontend tests.
+
+Backend access comes only from `/me`: its verified role, SharePoint user and configured site/list targets are used by the app. Missing identity/configuration or failed access resolution blocks the app without switching to direct SharePoint. Settings failures remain visible. Backend diagnostics use `/diagnostics`; direct diagnostics remain unchanged.
+
+The transport preserves person IDs/emails, calendar dates, reminder cycles and ETags. PATCH sends `If-Match` and accepts either the saved issue or a saved-but-unreadable receipt; 412 enters the existing conflict/reload flow. Creates and progress appends retain server IDs and warnings when readback fails. A known successful response that cannot identify its record consumes the submitted form/note and blocks that operation until **Reload saved data** succeeds. The accepted content must not be submitted again. These accepted-write guards are scoped to the connection and user in browser `sessionStorage`, so they survive same-tab page reloads as well as navigation and component remounts; if browser storage is unavailable, the in-memory guard still survives component remounts. This differs from unsaved draft archives, which remain only in the mounted app session. Recovery does not discard unrelated drafts or archived evidence.
+
+Canonical region choices include **France (Paris)** and **Asia Pacific (Bangkok)**; historical `Asia Pacific` values normalize to Bangkok alongside the existing legacy aliases.

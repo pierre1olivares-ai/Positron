@@ -56,17 +56,15 @@ spec:
 
 ---
 
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: qstar-issue-manager-backend-ingress
   namespace: default
   annotations:
-    kubernetes.io/ingress.class: "nginx"
-    kubernetes.io/ingress.allow-http: "false"
-    kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
         - ${host}
@@ -76,6 +74,9 @@ spec:
       http:
         paths:
           - path: /api
+            pathType: Prefix
             backend:
-              serviceName: qstar-issue-manager-backend-service
-              servicePort: 8080
+              service:
+                name: qstar-issue-manager-backend-service
+                port:
+                  number: 8080

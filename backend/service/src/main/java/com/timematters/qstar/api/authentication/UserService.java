@@ -1,15 +1,14 @@
 package com.timematters.qstar.api.authentication;
 
+import com.timematters.error.InternalServerError;
 import com.timematters.qstar.api.authentication.user.AuthenticatedUser;
 import com.timematters.qstar.api.authentication.user.UserId;
-import com.timematters.error.InternalServerError;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
 
-@Service
+/** Unwired legacy template example. No application identity is used by Q-Star APIs. */
 public class UserService {
     private UserRepository userRepository;
 

@@ -1,20 +1,12 @@
-# Backend — data & automation layer
+# Backend — Microsoft 365 data and automation
 
-SharePoint is still the system of record. As of IT's backend template share (Sept 2026), there's
-now also a custom Java service that sits in front of it as a thin authenticated gateway — see
-[`service/README.md`](service/README.md#architecture-thin-gateway-in-front-of-sharepoint) for why.
+SharePoint lists remain the system of record, with tenant Power Automate flows for automation. The SPFx frontend uses same-site SharePoint REST through PnPjs by default. An optional Java 21 gateway uses delegated on-behalf-of access to the same lists and enforces API roles, issue ownership, conditional writes, and lifecycle rules. Both paths retain the caller's SharePoint permissions and native audit identity.
 
-- **`service/`** — the Java/Spring Boot backend, scaffolded from time:matters' internal backend
-  template. Validates the SPFx web part's Azure AD bearer token, applies business rules, and
-  proxies to SharePoint via Microsoft Graph using its own app identity (`Sites.Selected`).
-- **`sharepoint/`** — the SharePoint List that stores every issue, the field/column mapping, and
-  the Graph data layer design `service/` implements server-side.
-  - `qstar-sharepoint-graph-integration.md` — column reference and Graph data layer design.
-  - `provisioning/` — scripts that create the List and its columns (`provision-qstar.ps1` for Windows/PnP PowerShell, `provision-qstar-m365.sh` for the M365 CLI).
-  - `connection-test-plan.md` — manual checklist for verifying the SharePoint/Power Automate side in a real tenant.
-- **`power-automate/`** — the intake flow (Microsoft Form → List item) and the daily reminder flow, documented step-by-step for building in the Power Automate designer.
+The gateway is disabled by default. Its [service guide](service/README.md) owns authentication configuration, local builds, and the unresolved tenant permission and activation checks. Do not enable it or broaden consent based on local test results alone.
 
-The frontend can talk to either layer directly — see the `dataSourceMode` web part property in
-[`../frontend/README.md`](../frontend/README.md) — until `service/` has somewhere to actually run.
+- [Integration contract](sharepoint/qstar-sharepoint-graph-integration.md): fields, native Person identities, reference allocation, secured progress folders, and settings.
+- [Provisioning and upgrades](sharepoint/provisioning/README.md): Bash/CLI and PnP PowerShell entry points, reviewed Region/history migration, and beta versus production permissions.
+- [Workflow build guide](power-automate/qstar-power-automate-flows.md): Forms intake, scheduled reminders and accepted updates, and assignment/folder ACL reconciliation. These instructions must be implemented and validated in the tenant; no deployed flows are included.
+- [Tenant verification](sharepoint/connection-test-plan.md): behavior and permissions that local automated checks cannot establish.
 
-See [`../CLAUDE.md`](../CLAUDE.md) for the full production constraints (no public-internet calls, single-site scope, no secrets in the frontend, data stays in the tenant).
+See [production constraints](../CLAUDE.md) for the single-site deployment and tenant data boundary. No application secrets belong in frontend settings.

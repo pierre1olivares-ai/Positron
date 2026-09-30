@@ -4,12 +4,12 @@
 FROM tmregistry.azurecr.io/base_java_21_jdk_ubuntu:latest
 # jar file has intentionally stripped off version suffixes
 
-ENV JAVA_APP_JAR qstar.jar
-ENV AB_OFF true
+ENV JAVA_APP_JAR=qstar.jar
+ENV AB_OFF=true
 
-EXPOSE 8080:8080
+EXPOSE 8080
 
 COPY ./build/libs/qstar-*.jar /app/qstar.jar
-ADD ./newrelic/* /app/
-
-CMD ["java", "-javaagent:/app/newrelic.jar", "-Dnewrelic.config.file=/app/newrelic.yml", "-Xmx1200m", "-jar", "/app/qstar.jar"]
+# Telemetry is opt-in. The checked-in template agent configuration is not activated.
+# Leave room for metaspace/native allocations inside the 750Mi container limit.
+CMD ["java", "-XX:MaxRAMPercentage=65.0", "-jar", "/app/qstar.jar"]

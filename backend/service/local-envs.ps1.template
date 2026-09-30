@@ -1,18 +1,31 @@
-$env:SPRING_PROFILES_ACTIVE='local'
+# Dot-source a private copy of this file; never commit credentials.
+# Disabled backend boots and runs local tests without any Entra/SharePoint secrets.
+$env:TM_QSTAR_BACKEND_ENABLED = 'false'
+$env:TM_STAGE = 'local'
+$env:TM_QSTAR_BUGSNAG_ENABLED = 'false'
 
-$env:TM_QSTAR_BUGSNAG_KEY=
-$env:TM_QSTAR_DATASOURCE_URL=
-$env:TM_QSTAR_DATASOURCE_USERNAME=
-$env:TM_QSTAR_DATASOURCE_PASSWORD=
+# Populate only after IT has verified a narrowly scoped delegated SharePoint REST
+# permission grant and completed the acceptance checklist in README.md.
+# Do not consent tenant-wide scopes or switch on application permissions as a workaround.
+# $env:TM_QSTAR_AD_TENANT_ID = '<tenant GUID>'
+# $env:TM_QSTAR_AD_CLIENT_ID = '<this API application GUID>'
+# $env:TM_QSTAR_AD_APP_ID_URI = 'api://<this API application GUID>'
+# $env:TM_QSTAR_API_SCOPE = 'user_impersonation'
+# $env:TM_QSTAR_ALLOWED_ORIGINS = 'https://<tenant>.sharepoint.com'
+# $env:TM_QSTAR_SP_SITE_URL = 'https://<tenant>.sharepoint.com/sites/Quality'
+# $env:TM_QSTAR_ISSUES_LIST = 'Q-Star Issues'
+# $env:TM_QSTAR_PROGRESS_LIST = 'Q-Star Progress Log'
+# $env:TM_QSTAR_CONFIG_LIST = 'Q-Star Config'
+# $env:TM_QSTAR_BETA_ACCESS_MODE = 'false'
 
-$env:TM_QSTAR_AD_CLIENT_ID=
-$env:TM_QSTAR_AD_CLIENT_SECRET=
-$env:TM_QSTAR_AD_TENANT_ID=
+# OBO confidential-client credential: a secret OR a registered certificate.
+# Obtain it through the deployment secret store; no value is supplied here.
+# $env:TM_QSTAR_AD_CLIENT_SECRET = '<secret-store value>'
+# $env:TM_QSTAR_AD_CERTIFICATE_PATH = '<mounted PFX or P12 path>'
+# $env:TM_QSTAR_AD_CERTIFICATE_PASSWORD = '<secret-store value>'
 
-# App identity this backend uses to call Microsoft Graph (Sites.Selected) against
-# the Quality SharePoint site. May be the same registration as AD_CLIENT_ID/SECRET
-# above, or a separate one — see application.properties.
-$env:TM_QSTAR_SP_CLIENT_ID=
-$env:TM_QSTAR_SP_CLIENT_SECRET=
-$env:TM_QSTAR_SP_SITE_HOSTNAME=
-$env:TM_QSTAR_SP_SITE_PATH=
+# App-role values must be distinct; these are the defaults, not group names.
+# $env:TM_QSTAR_ADMIN_ROLE = 'QStar.Admin'
+# $env:TM_QSTAR_QM_ROLE = 'QStar.QM'
+# $env:TM_QSTAR_OWNER_ROLE = 'QStar.Owner'
+# $env:TM_QSTAR_READER_ROLE = 'QStar.Reader'

@@ -4,20 +4,26 @@ import { Version } from '@microsoft/sp-core-library';
 import {
   type IPropertyPaneConfiguration,
   PropertyPaneChoiceGroup,
-  PropertyPaneTextField
+  PropertyPaneTextField,
+  PropertyPaneToggle
 } from '@microsoft/sp-property-pane';
 import { BaseClientSideWebPart } from '@microsoft/sp-webpart-base';
 import { IReadonlyTheme } from '@microsoft/sp-component-base';
 
 import * as strings from 'QstarIssueManagerWebPartStrings';
 import QstarIssueManager from './components/QstarIssueManager';
-import { IQstarIssueManagerProps } from './components/IQstarIssueManagerProps';
-import { IDataService } from './services/IDataService';
+import { IQstarConnection, IQstarIssueManagerProps } from './components/IQstarIssueManagerProps';
 import { SharePointDataService } from './services/SharePointDataService';
+import { BackendApiClient } from './services/BackendApiClient';
+import { BackendRoleResolver } from './services/BackendRoleResolver';
 import { BackendApiDataService } from './services/BackendApiDataService';
 import { ConnectionDiagnosticsService, ICheckResult } from './services/ConnectionDiagnosticsService';
 import { BackendDiagnosticsService } from './services/BackendDiagnosticsService';
 import { DEFAULT_ISSUES_LIST, DEFAULT_PROGRESS_LIST } from './services/fieldMap';
+import { DevelopmentRoleResolver, SharePointRoleResolver } from './services/SharePointRoleResolver';
+import { MockDataService } from './services/MockDataService';
+import type { IDataService } from './services/IDataService';
+import type { IRoleResolver } from './services/IRoleResolver';
 
 export type DataSourceMode = 'backend' | 'sharepoint';
 
@@ -34,44 +40,80 @@ export interface IQstarIssueManagerWebPartProps {
   siteUrl: string;
   issuesListName: string;
   progressListName: string;
+  betaAccessMode: boolean;
 }
 
 export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQstarIssueManagerWebPartProps> {
 
   private _isDarkTheme: boolean = false;
   private _environmentMessage: string = '';
+  private _connectionServices: {
+    key: string;
+    dataService: IDataService;
+    roleResolver: IRoleResolver;
+    diagnostics: { run(): Promise<ICheckResult[]> };
+  } | undefined;
 
   public render(): void {
     const issuesListName = this.properties.issuesListName || DEFAULT_ISSUES_LIST;
     const progressListName = this.properties.progressListName || DEFAULT_PROGRESS_LIST;
-    const siteUrl = this.properties.siteUrl || undefined;
+    const siteUrl = this.properties.siteUrl ? this.properties.siteUrl.trim().replace(/\/+$/, '') : undefined;
     const mode: DataSourceMode = this.properties.dataSourceMode || 'sharepoint';
+    const backendBaseUrl = (this.properties.backendBaseUrl || '').trim().replace(/\/+$/, '');
+    const backendResourceId = (this.properties.backendResourceId || '').trim();
+    const connection: IQstarConnection = {
+      dataSourceMode: mode,
+      backendBaseUrl: mode === 'backend' ? backendBaseUrl : undefined,
+      siteUrl: siteUrl || this.context.pageContext.web.absoluteUrl,
+      issuesListName,
+      progressListName,
+      betaAccessMode: !!this.properties.betaAccessMode
+    };
+    const connectionKey = JSON.stringify([
+      mode,
+      ...(mode === 'backend' ? [backendBaseUrl, backendResourceId] : [
+        connection.siteUrl, issuesListName, progressListName, connection.betaAccessMode
+      ]),
+      this.context.isServedFromLocalhost,
+      this.context.pageContext.user.email
+    ]);
 
-    let dataService: IDataService;
-    let runConnectionDiagnostics: () => Promise<ICheckResult[]>;
-
-    if (mode === 'backend') {
-      const backendBaseUrl = this.properties.backendBaseUrl || '';
-      const backendResourceId = this.properties.backendResourceId || '';
-      dataService = new BackendApiDataService(this.context, backendResourceId, backendBaseUrl);
-      const backendDiagnostics = new BackendDiagnosticsService(this.context, backendResourceId, backendBaseUrl);
-      runConnectionDiagnostics = (): Promise<ICheckResult[]> => backendDiagnostics.run();
-    } else {
-      dataService = new SharePointDataService(this.context, issuesListName, progressListName, siteUrl);
-      const spDiagnostics = new ConnectionDiagnosticsService(this.context, issuesListName, progressListName, siteUrl);
-      runConnectionDiagnostics = (): Promise<ICheckResult[]> => spDiagnostics.run();
+    if (!this._connectionServices || this._connectionServices.key !== connectionKey) {
+      if (mode === 'backend') {
+        const client = new BackendApiClient(this.context, backendResourceId, backendBaseUrl);
+        this._connectionServices = {
+          key: connectionKey,
+          dataService: new BackendApiDataService(client),
+          diagnostics: new BackendDiagnosticsService(client),
+          roleResolver: new BackendRoleResolver(client, backendBaseUrl)
+        };
+      } else this._connectionServices = {
+        key: connectionKey,
+        dataService: this.context.isServedFromLocalhost
+          ? new MockDataService()
+          : new SharePointDataService(this.context, issuesListName, progressListName, siteUrl),
+        diagnostics: new ConnectionDiagnosticsService(this.context, issuesListName, progressListName, siteUrl),
+        roleResolver: this.context.isServedFromLocalhost
+          ? new DevelopmentRoleResolver('admin')
+          : new SharePointRoleResolver(this.context, undefined, siteUrl, connection.betaAccessMode)
+      };
     }
+    const { dataService, diagnostics, roleResolver } = this._connectionServices;
 
     const element: React.ReactElement<IQstarIssueManagerProps> = React.createElement(
       QstarIssueManager,
       {
+        key: connectionKey,
         description: this.properties.description,
         isDarkTheme: this._isDarkTheme,
         environmentMessage: this._environmentMessage,
         hasTeamsContext: !!this.context.sdks.microsoftTeams,
         userDisplayName: this.context.pageContext.user.displayName,
+        userEmail: this.context.pageContext.user.email,
+        connection,
         dataService,
-        runConnectionDiagnostics
+        roleResolver,
+        runConnectionDiagnostics: (): Promise<ICheckResult[]> => diagnostics.run()
       }
     );
 
@@ -157,7 +199,7 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
                   label: 'Data source',
                   options: [
                     { key: 'sharepoint', text: 'SharePoint direct (works today, no backend deployment needed)' },
-                    { key: 'backend', text: 'Backend API (backend/service/ — target architecture, needs it deployed)' }
+                    { key: 'backend', text: 'Backend API (requires deployment and acceptance; disabled by default on the server)' }
                   ]
                 })
               ]
@@ -175,6 +217,11 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
                 PropertyPaneTextField('progressListName', {
                   label: 'Progress log list name',
                   value: DEFAULT_PROGRESS_LIST
+                }),
+                PropertyPaneToggle('betaAccessMode', {
+                  label: 'Beta access mode (use existing site permissions)',
+                  onText: 'Enabled',
+                  offText: 'Disabled'
                 })
               ]
             },
@@ -185,7 +232,7 @@ export default class QstarIssueManagerWebPart extends BaseClientSideWebPart<IQst
                   label: 'Backend base URL, e.g. https://qstar.time-matters.com/api/v1'
                 }),
                 PropertyPaneTextField('backendResourceId', {
-                  label: "Backend's Azure AD App ID URI (for requesting an access token)"
+                  label: "Backend Entra application ID or resource URI"
                 })
               ]
             }

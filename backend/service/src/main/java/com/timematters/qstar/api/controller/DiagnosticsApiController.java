@@ -2,11 +2,11 @@ package com.timematters.qstar.api.controller;
 
 import com.timematters.error.GenericError;
 import com.timematters.qstar.api.model.DiagnosticCheckATO;
+import com.timematters.qstar.configuration.security.AuthorizationPolicy;
 import com.timematters.qstar.service.DiagnosticsService;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,11 +18,16 @@ public class DiagnosticsApiController extends AbstractController implements Diag
 
     private final NativeWebRequest request;
     private final DiagnosticsService diagnosticsService;
+    private final AuthorizationPolicy authorization;
 
     @Autowired
-    public DiagnosticsApiController(NativeWebRequest request, DiagnosticsService diagnosticsService) {
+    public DiagnosticsApiController(
+            NativeWebRequest request,
+            DiagnosticsService diagnosticsService,
+            AuthorizationPolicy authorization) {
         this.request = request;
         this.diagnosticsService = diagnosticsService;
+        this.authorization = authorization;
     }
 
     @Override
@@ -32,11 +37,7 @@ public class DiagnosticsApiController extends AbstractController implements Diag
 
     @Override
     public ResponseEntity<List<DiagnosticCheckATO>> getDiagnostics() throws GenericError {
-        try {
-            return new ResponseEntity<>(diagnosticsService.runChecks(), HttpStatus.OK);
-        } catch (Exception exception) {
-            rethrowAsUnexptedError(getRequest().orElse(null), exception);
-            return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
-        }
+        authorization.requireAdmin();
+        return ResponseEntity.ok(diagnosticsService.runChecks());
     }
 }

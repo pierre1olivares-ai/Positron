@@ -1,80 +1,69 @@
-import * as React from 'react';
-import styles from './QstarIssueManager.module.scss';
-import type { IQstarIssueManagerProps } from './IQstarIssueManagerProps';
-import type { ICheckResult } from '../services/ConnectionDiagnosticsService';
-import { escape } from '@microsoft/sp-lodash-subset';
+import * as React from "react";
+
+import styles from "./QstarIssueManager.module.scss";
+import type { IQstarIssueManagerProps } from "./IQstarIssueManagerProps";
+import type { IResolvedRole } from "../models/IRole";
+import QstarPrototype from "./QstarPrototype";
 
 export interface IQstarIssueManagerState {
-  diagnosticsRunning: boolean;
-  diagnosticsResults: ICheckResult[] | undefined;
-  diagnosticsError: string | undefined;
-}
-
-const STATUS_ICON: Record<ICheckResult['status'], string> = {
-  pass: '✅',
-  warn: '⚠️',
-  fail: '❌',
-};
-
-function statusClassName(status: ICheckResult['status']): string {
-  switch (status) {
-    case 'pass': return styles.diagnostic_pass;
-    case 'warn': return styles.diagnostic_warn;
-    case 'fail': return styles.diagnostic_fail;
-    default: return '';
-  }
+  roleResolution?: IResolvedRole;
+  roleError?: string;
 }
 
 export default class QstarIssueManager extends React.Component<IQstarIssueManagerProps, IQstarIssueManagerState> {
-  constructor(props: IQstarIssueManagerProps) {
+  private _mounted: boolean = false;
+
+  public constructor(props: IQstarIssueManagerProps) {
     super(props);
-    this.state = { diagnosticsRunning: false, diagnosticsResults: undefined, diagnosticsError: undefined };
+    this.state = {};
   }
 
-  private runDiagnostics = (): void => {
-    this.setState({ diagnosticsRunning: true, diagnosticsError: undefined });
-    this.props
-      .runConnectionDiagnostics()
-      .then((results) => this.setState({ diagnosticsRunning: false, diagnosticsResults: results }))
-      .catch((e: Error) => this.setState({ diagnosticsRunning: false, diagnosticsError: e.message }));
-  };
+  public componentDidMount(): void {
+    this._mounted = true;
+    this.props.roleResolver.resolve()
+      .then((roleResolution) => {
+        if (roleResolution.source === "backend" && (!roleResolution.user || !roleResolution.connection)) {
+          throw new Error("The backend did not return a verified user and connection. Access is disabled.");
+        }
+        if (this._mounted) this.setState({ roleResolution, roleError: undefined });
+      })
+      .catch((error: Error) => {
+        if (this._mounted) this.setState({ roleError: error.message });
+      });
+  }
+
+  public componentWillUnmount(): void {
+    this._mounted = false;
+  }
 
   public render(): React.ReactElement<IQstarIssueManagerProps> {
-    const {
-      description,
-      isDarkTheme,
-      environmentMessage,
-      hasTeamsContext,
-      userDisplayName
-    } = this.props;
-    const { diagnosticsRunning, diagnosticsResults, diagnosticsError } = this.state;
+    const { roleResolution, roleError } = this.state;
+
+    if (roleError) {
+      return (
+        <section className={styles.accessError} role="alert">
+          <h2>Q-Star access could not be verified</h2>
+          <p>Access is disabled because your Q-Star role could not be resolved.</p>
+          <p className={styles.errorDetail}>{roleError}</p>
+        </section>
+      );
+    }
+
+    if (!roleResolution) {
+      return <section className={styles.loading}>Checking your Q-Star access…</section>;
+    }
 
     return (
-      <section className={`${styles.qstarIssueManager} ${hasTeamsContext ? styles.teams : ''}`}>
-        <div className={styles.welcome}>
-          <img alt="" src={isDarkTheme ? require('../assets/welcome-dark.png') : require('../assets/welcome-light.png')} className={styles.welcomeImage} />
-          <h2>Well done, {escape(userDisplayName)}!</h2>
-          <div>{environmentMessage}</div>
-          <div>Web part property value: <strong>{escape(description)}</strong></div>
-        </div>
-
-        <div className={styles.diagnostics}>
-          <h3>Connection diagnostics</h3>
-          <p>Run this once the &quot;Q-Star Issues&quot; / &quot;Q-Star Progress Log&quot; lists are provisioned to confirm this web part can read and write them under your own permissions.</p>
-          <button onClick={this.runDiagnostics} disabled={diagnosticsRunning}>
-            {diagnosticsRunning ? 'Running…' : 'Run Connection Test'}
-          </button>
-          {diagnosticsError && <p className={styles.diagnosticFail}>{diagnosticsError}</p>}
-          {diagnosticsResults && (
-            <ul className={styles.diagnosticList}>
-              {diagnosticsResults.map((r, idx) => (
-                <li key={idx} className={statusClassName(r.status)}>
-                  <span>{STATUS_ICON[r.status]}</span> <strong>{r.name}</strong> — {r.message}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+      <section className={`${styles.qstarIssueManager} ${this.props.hasTeamsContext ? styles.teams : ""}`}>
+        <QstarPrototype
+          dataService={this.props.dataService}
+          profile={roleResolution.role}
+          userDisplayName={roleResolution.user?.displayName || this.props.userDisplayName}
+          userEmail={roleResolution.user?.email || this.props.userEmail}
+          connection={roleResolution.connection || this.props.connection}
+          developmentMode={roleResolution.source === "development"}
+          onRunDiagnostics={this.props.runConnectionDiagnostics}
+        />
       </section>
     );
   }

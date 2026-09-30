@@ -13,11 +13,8 @@ import org.jdbi.v3.jackson2.Jackson2Plugin;
 import org.jdbi.v3.postgres.PostgresPlugin;
 import org.jdbi.v3.sqlobject.SqlObjectPlugin;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.flyway.FlywayDataSource;
-import org.springframework.stereotype.Service;
 
-@Service
-@FlywayDataSource
+/** Unwired IT-template example; the running Q-Star backend does not use a database. */
 public class QstarDatabase implements DatabaseConnection {
     private String url;
     private String user;

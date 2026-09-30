@@ -8,12 +8,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
-import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
-@Service
+/** Unwired legacy template example; never used by Q-Star endpoints or OBO transport. */
 public class MicrosoftGraphClient {
 
     private String BASE_URL = "https://graph.microsoft.com/";

@@ -6,7 +6,6 @@ import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.jwt.Jwt;
-import org.springframework.stereotype.Service;
 
 // NOTE: the template's version of this class was written against
 // `com.microsoft.azure.spring.autoconfigure.aad.UserPrincipal`, from the
@@ -18,7 +17,7 @@ import org.springframework.stereotype.Service;
 // (OAuth2 Resource Server / JWT bearer) setup, the authenticated principal is
 // a standard Spring Security `Jwt`, not a `UserPrincipal` — rewritten below
 // to extract the same "oid" claim from that instead.
-@Service
+// Unwired legacy template example. CurrentUserProvider is the active delegated identity service.
 public class UserRepository {
 
     private MicrosoftGraphClient graphClient;

@@ -2,11 +2,11 @@ package com.timematters.qstar.api.controller;
 
 import com.timematters.error.GenericError;
 import com.timematters.qstar.api.model.SettingsATO;
+import com.timematters.qstar.configuration.security.AuthorizationPolicy;
 import com.timematters.qstar.infrastructure.sharepoint.SettingsRepository;
 import com.timematters.qstar.model.mapper.SettingsMapper;
 import java.util.Optional;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,12 +18,17 @@ public class SettingsApiController extends AbstractController implements Setting
 
     private final NativeWebRequest request;
     private final SettingsRepository settingsRepository;
+    private final AuthorizationPolicy authorization;
     private final SettingsMapper settingsMapper = new SettingsMapper();
 
     @Autowired
-    public SettingsApiController(NativeWebRequest request, SettingsRepository settingsRepository) {
+    public SettingsApiController(
+            NativeWebRequest request,
+            SettingsRepository settingsRepository,
+            AuthorizationPolicy authorization) {
         this.request = request;
         this.settingsRepository = settingsRepository;
+        this.authorization = authorization;
     }
 
     @Override
@@ -33,22 +38,13 @@ public class SettingsApiController extends AbstractController implements Setting
 
     @Override
     public ResponseEntity<SettingsATO> getSettings() throws GenericError {
-        try {
-            return new ResponseEntity<>(settingsMapper.toATO(settingsRepository.load()), HttpStatus.OK);
-        } catch (Exception exception) {
-            rethrowAsUnexptedError(getRequest().orElse(null), exception);
-            return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
-        }
+        return ResponseEntity.ok(settingsMapper.toATO(settingsRepository.load()));
     }
 
     @Override
     public ResponseEntity<SettingsATO> saveSettings(SettingsATO settingsATO) throws GenericError {
-        try {
-            var saved = settingsRepository.save(settingsMapper.fromATO(settingsATO));
-            return new ResponseEntity<>(settingsMapper.toATO(saved), HttpStatus.OK);
-        } catch (Exception exception) {
-            rethrowAsUnexptedError(getRequest().orElse(null), exception);
-            return new ResponseEntity<>(HttpStatus.INTERNAL_SERVER_ERROR);
-        }
+        authorization.requireAdmin();
+        var saved = settingsRepository.save(settingsMapper.fromATO(settingsATO));
+        return ResponseEntity.ok(settingsMapper.toATO(saved));
     }
 }

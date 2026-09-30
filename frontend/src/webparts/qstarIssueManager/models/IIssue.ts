@@ -1,6 +1,5 @@
-// Field names and shapes mirror the prototype's in-memory issue object
-// (frontend/prototype/qstar-issue-manager.jsx, STORAGE_KEY "qstar:issues:v2")
-// one-for-one, so the ported UI components require no changes.
+// Keep SharePoint internal field names and serialization in services/fieldMap.ts
+// and services/SharePointDataService.ts, outside the UI's issue model.
 
 export type Severity = "Critical" | "High" | "Medium" | "Low";
 
@@ -21,14 +20,22 @@ export type TransformedInto =
 export type YesNo = "Yes" | "No";
 
 export interface IProgressLogEntry {
+  id?: number;
   ts: string;
   author: string;
+  authorId?: number;
+  authorEmail?: string;
   text: string;
+  saveWarning?: string;
 }
 
 export interface IIssue {
   qsNumber: number;
   id: number;
+  /** SharePoint version used for an optimistic-concurrency update. */
+  eTag?: string;
+  /** The create was accepted; do not repeat it when reference synchronization or readback fails. */
+  saveWarning?: string;
   triaged: boolean;
   status: IssueStatus | undefined;
   taskCreated: YesNo;
@@ -39,6 +46,8 @@ export interface IIssue {
   immediateAction: string;
   severity: Severity;
   createdBy: string;
+  createdById?: number;
+  createdByEmail?: string;
   reportDate: string;
   departmentBU: string;
   region: string;
@@ -49,6 +58,8 @@ export interface IIssue {
 
   followUp: string;
   taskOwner: string;
+  taskOwnerId?: number;
+  taskOwnerEmail?: string;
   ownerBU: string;
   dueDate: string;
 
@@ -57,6 +68,8 @@ export interface IIssue {
   implementationDate: string;
   effectivenessCheck: string;
   verifiedBy: string;
+  verifiedById?: number;
+  verifiedByEmail?: string;
   verifiedDate: string;
   closedDate: string;
   closedAt: string;
@@ -67,6 +80,7 @@ export interface IIssue {
   ownerUpdate: boolean;
   ownerUpdateAt: string;
   ownerUpdateText: string;
+  reminderCycle: string;
 
   attachments: unknown[];
   progressLog: IProgressLogEntry[];

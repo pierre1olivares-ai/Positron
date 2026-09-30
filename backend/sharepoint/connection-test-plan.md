@@ -1,61 +1,76 @@
-# Connection test plan — SharePoint & Power Automate
+# Tenant verification — SharePoint and Power Automate
 
-This is a manual verification checklist for confirming the Q-Star system works end-to-end in your company's Microsoft 365 tenant. It exists because none of this can be exercised from outside your tenant: it needs a real signed-in user, a real SharePoint site, and Power Automate running under your tenant's connections. Run through it once after provisioning, and again after any schema or flow change.
+Run after schema, data service, or flow changes against a test site with real Admin, Quality Manager, two owner, and Reader accounts. Local tests cannot substitute for SharePoint permissions or actual flow execution.
 
-## 0. Prerequisites
+## Prerequisites
 
-- [ ] `backend/sharepoint/provisioning/provision-qstar.ps1` (or `provision-qstar-m365.sh`) has been run against your Quality site, with `-PersonAsText` (or `PERSON_AS_TEXT=1`).
-- [ ] The web part builds locally (`cd frontend && npm install && npx gulp bundle`) with no errors.
-- [ ] You have edit access to the Quality site to add the web part to a test page.
+1. Pause writes and flows for an existing register; export a backup. Run Region and progress migration previews, review mappings, then apply as documented in [provisioning](provisioning/README.md).
+2. Confirm one Config item, valid immutable ReferenceOffset, canonical native Person fields, current Region choices, folder-enabled Progress Log, and no loose/unmapped history.
+3. Deploy the web part and all three [flows](../power-automate/qstar-power-automate-flows.md). Put their service identity in Q-Star Admins. Configure business timezone, quality recipients, rollout cutoff, and serialized delivery.
 
-## 1. SharePoint connection (automated self-test, built into the app)
+## Connection diagnostics
 
-1. Add the Q-Star Issue Manager web part to a test page on the Quality site (via `gulp serve` pointed at your tenant's Workbench, or deploy the `.sppkg` to the app catalog first).
-2. Open the Admin / IT-settings tab and click **Run Connection Test**.
-3. Confirm every check passes:
-   - Site access
-   - Signed-in user resolved
-   - `Q-Star Issues` list found, all expected columns present
-   - `Q-Star Progress Log` list found, all expected columns present
-   - `Under Testing/Revision` present in the Status choice list
-   - `Status` / `Triaged` / `DueDate` indexed (warn is OK, fail is not)
-   - Round-trip write test (create → update → delete) passes
+Run the Admin connection test. Confirm site/user access, required columns and types, choice values, indexes, and the disposable item create/update/delete round trip. Inspect and remove any test artifact if cleanup failed. Run read paths as QM, Owner, and Reader; Config must load without granting them settings-write permission.
 
-If anything fails, the message names the missing list/column — re-run the provisioning script (it's idempotent) and retry.
+## References and preserved data
 
-## 2. Manual SharePoint sanity check (if you don't have the web part running yet)
+- Create issues concurrently from two browsers and Forms. Every new QsNumber equals ReferenceOffset + that item's ID, with no collision with legacy references.
+- Interrupt the second number-materialization action. Resume the same created item; no duplicate intake should appear. A Forms replay uses its response-ID log.
+- Compare migrated records with the backup: Region aliases map correctly (Germany → Western Europe (Amsterdam), Asia Pacific → Asia Pacific (Bangkok)); France (Paris) is available for new reports. Descriptions, attachments, old QsNumber, progress item IDs, Author and Created remain intact. Repeating provisioning keeps the same offset and journal mapping.
 
-1. Open `Q-Star Issues` in SharePoint (list view). Confirm you can add an item and edit `Status` to `Under Testing/Revision` without SharePoint rejecting the choice value.
-2. Open `Q-Star Progress Log`. Confirm you can add an item with a `Parent Item Id` pointing at a real issue's ID.
-3. Confirm your account, and one account per role (Admin / Quality Manager / Task Owner / Reader), can read the list — this previews permission issues before the app's role gating goes live.
+## Editing, lifecycle, and recovery
 
-## 3. Intake flow (Microsoft Form → list item)
+Verify the [user-facing save and recovery contract](../../README.md#saving-and-recovering-drafts) with real SharePoint sessions. Copy any evidence before refreshing the page, since recovered drafts are session-local.
 
-1. Submit the Q-Star Microsoft Form as a test user.
-2. In Power Automate, open the intake flow's **run history** and confirm the run succeeded.
-3. In `Q-Star Issues`, confirm a new item appeared with `Triaged = No`, `Task Created = No`, `Status` empty, and a `QsNumber` one higher than the previous max.
-4. Delete the test item afterward so it doesn't pollute the triage queue.
+- Open one issue in two editors. Save in one, then submit a different draft from the other. The stale save must conflict without overwriting saved fields; its draft remains available until explicit reload/discard. Change only an owner's email and confirm the saved native Person identity changes.
+- Start an NC effectiveness test, edit a follow-up note, and save. Confirm the accepted test state persists. Exercise both closure routes before and after the test end, including month ends and a verifier identity; close an OFI without NC-only fields. Reopen and verify the new cycle retains the reference and journal.
+- While a save, append, or reload is pending, return to the register and reopen that issue. Detail/progress editing and both closure routes must remain blocked. A rejected append keeps its text/error, including with intervening reload requests; closing requires a fresh action after pending work settles. An independent issue remains editable.
+- Finish issue A's triage or reload while editing B. B must stay open with its detail and progress drafts intact. A clean editor reopened during an ordinary save must use the accepted version after that save finishes.
+- Leave detail, hold, and progress drafts, then reload after another session closes the issue or reassigns it away. Confirm read-only controls and selectable recovery copies. Reopen or reassign back, type and submit fresh content, and repeat the transition: earlier copies, including identical text in distinct copies, must remain available. Discard one copy and verify other copies, live drafts, and saved data remain unchanged. Successful own detail saves and progress posts must clear only their submitted draft part.
+- Accept a close through each route, then fail its readback. It must remain closed and read-only across register navigation, with unsubmitted recovery content retained. Trigger a saved warning on B and reload B; return to A and use its own **Reload this issue** action. Exercise a failed reload followed by a successful one without losing archives or allowing writes from the unavailable version.
+- Change the connection in web-part properties and confirm Settings displays that target and access is resolved again. Confirm today's reports appear in dashboard year-to-date totals.
 
-## 4. Daily reminder flow — seeded scenarios
+## Production permissions and journal integrity
 
-Create three throwaway items (delete them after) to exercise each branch in `qstar-sharepoint-graph-integration.md` §5:
+- Create an unassigned issue; Flow C creates its folder. Assign Owner A; A can edit the issue and append inside its exact folder.
+- Attempt REST append into Owner B's folder as A. It must fail. A cannot edit/delete a previous entry or alter its server author/time. A forged ParentItemId cannot redirect UI grouping.
+- As a QM, append to either issue but verify editing/deleting old journal entries is denied. Admin maintenance access remains intentional.
+- Reassign A → B, then B → empty. Confirm each former owner's issue Edit and folder Append are removed after Flow C finishes, while group read and QM/Admin access remain. Repeat reconciliation and rapidly queue changes; final ACLs reflect the latest assignment.
+- Confirm a successful comment creates one durable journal item even if a later reload fails. Refresh before manually retrying an ambiguous request. Beta cannot validate production isolation because it retains site permissions.
 
-| Scenario | Setup | Expected on next flow run |
-|---|---|---|
-| **Overdue task** (rules 3–5) | `Status = In Progress`, `TaskCreated = Yes`, `DueDate` = 10 days ago, `TaskOwner`/`EscalationBU` set | Task Owner gets an overdue nudge; Quality Team gets a QM alert; BU lead gets an escalation (since overdue ≥ 7 days) |
-| **NC mid-test** (rule 6) | `TransformedInto = NC Major`, `Status = Under Testing/Revision`, `ImplementationDate` = 55 days ago (test ends in ~5 days) | Task Owner gets a "test ending soon" notice, **not** an overdue nudge |
-| **NC test elapsed** (rule 7) | Same as above but `ImplementationDate` = 61+ days ago | Task Owner **and** Quality Team get a "verify & close" notice |
+## Optional backend acceptance
 
-For each: trigger the flow manually (**Run flow** > **Run now** in the Power Automate designer, or wait for the daily schedule), then check the run history for the expected branch and recipient, and confirm the actual email/Teams message arrived.
+Backend mode remains disabled until IT confirms the narrow delegated permission boundary described in the [service guide](../service/README.md). Local mocks do not establish that SharePoint REST supports the selected permission in this tenant. Do not broaden consent to make a failing test pass.
 
-## 5. De-duplication
+After that prerequisite is satisfied, use a test deployment and the same accounts and records for both access paths:
 
-Run the reminder flow twice in the same day against the same overdue item. Confirm only one notification is sent (check whichever de-dupe mechanism was built — Reminder Log list or last-notified fields per §5.5) — the second run should skip it.
+- Reject missing, expired, wrong-tenant, wrong-issuer, wrong-audience, app-only, and missing-scope tokens. Unknown app roles must have no write capability. Verify explicit Admin/QM/Owner/Reader assignments and that `/me` returns the delegated SharePoint user and the actual configured site/lists.
+- Request another site and verify the issued downstream token cannot access it. Confirm the service never accepts a caller-supplied site or switches to an application token. SharePoint audit `Author` and `Created` must identify the real caller and server timestamp.
+- Exercise owner writes on the currently assigned issue and on another owner's issue. Forbid reassignment, QM-only fields, closing, reopening, and under-test detail changes by an owner. Tamper with native IDs, author, parent, timestamps, and server-managed reference fields; none may override the server's values.
+- Open the same issue through the direct and backend paths. A stale backend PATCH must return 412 using its original ETag, and neither path may overwrite the other. Test explicit null clears, email-only person changes, legacy references, concurrent intake, and the complete NC/OFI lifecycle.
+- Append as QM and current owner into the correct existing folder. Confirm native audit identity, append-only rights, folder-based grouping, and no journal entries created at the root. Verify reassignment removes old access after Flow C completes.
+- Fail readback after accepted create, PATCH, and append. Confirm warning receipts retain the created identity when available, no operation is automatically repeated, and a successful reload restores a usable version. Exercise an unreadable accepted response across navigation and reload; submitted content must not be offered for duplicate submission.
+- Load the real SPFx page through its SharePoint origin. Verify CORS preflight and readable ETag/receipt headers, authenticated diagnostics, errors on denied settings reads, and no fallback to direct SharePoint after backend failure. Changing the backend target must reload `/me` and the app's connection state.
 
-## 6. Sign-off
+Record the service build, token permission grant, role assignments, permission-boundary evidence, and the deployed web-part package with the results. The backend's stronger field checks apply to API requests; direct SharePoint Edit rights remain as described above.
 
-Once sections 1–5 pass with no unexpected failures, the connection between the web part, the SharePoint lists, and the Power Automate flows is confirmed working in your tenant. Record the date and who ran it here:
+## Notifications and dates
 
-- Date:
-- Run by:
-- Notes:
+All scenario items need Triaged = Yes and TaskCreated = Yes. Use explicit business calendar dates, including month ends and a daylight-saving boundary.
+
+| Scenario | Expected |
+|---|---|
+| In Progress, DueDate ten days ago | Previously unlogged overdue owner, QM and BU milestones catch up |
+| On Hold with old DueDate, HoldUntil today | Hold owner/QM events only; no overdue escalation |
+| NC Under Testing/Revision, ImplementationDate two calendar months ago, no DueDate | Test-end owner/QM events; no null date failure |
+| Missing the branch's required date | Data-quality alert; no malformed email/date expression |
+| Accepted progress then reassignment or closure | One Quality Team event for that entry ID |
+| Owner status change then QM dismisses badge | Latest OwnerUpdateAt notification still dispatches |
+| Reopen with same due date | New ReminderCycle permits new milestones |
+| Changed owner or milestone date | New recipient/milestone event can send |
+
+Run identical events twice: the second run skips Sent records. Simulate a send/log interruption: Pending is surfaced for reconciliation and is not blindly resent. Check actual mailbox delivery as well as run history. Verify every SharePoint Get items operation paginates beyond the site's expected item count.
+
+## Record results
+
+Record deployment versions, tenant/site, test accounts, date, cases exercised, observed revocation delay, and any unresolved failure. Do not treat this checklist as passed until the checks have actually run.

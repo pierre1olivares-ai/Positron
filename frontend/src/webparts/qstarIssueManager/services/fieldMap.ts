@@ -10,7 +10,6 @@ export const ISSUE_FIELDS = {
   immediateAction: "ImmediateAction",
   severity: "Severity",
   createdBy: "ReportedBy",
-  createdByEmail: "ReportedByEmail",
   reportDate: "ReportDate",
   departmentBU: "DepartmentBU",
   region: "Region",
@@ -26,7 +25,7 @@ export const ISSUE_FIELDS = {
   triaged: "Triaged",
 
   taskOwner: "TaskOwner",
-  taskOwnerEmail: "TaskOwnerEmail",
+  permissionedOwnerEmail: "PermissionedOwnerEmail",
   ownerBU: "EscalationBU",
   dueDate: "DueDate",
 
@@ -35,7 +34,6 @@ export const ISSUE_FIELDS = {
   implementationDate: "ImplementationDate",
   effectivenessCheck: "EffectivenessCheck",
   verifiedBy: "VerifiedBy",
-  verifiedByEmail: "VerifiedByEmail",
   verifiedDate: "VerifiedDate",
   closedDate: "ClosedDate",
   closedAt: "ClosedAt",
@@ -46,12 +44,12 @@ export const ISSUE_FIELDS = {
   ownerUpdate: "OwnerUpdate",
   ownerUpdateAt: "OwnerUpdateAt",
   ownerUpdateText: "OwnerUpdateText",
+  reminderCycle: "ReminderCycle",
 } as const;
 
 export const PROGRESS_FIELDS = {
   parentItemId: "ParentItemId",
   author: "Author",
-  authorEmail: "AuthorEmail",
   entryDate: "EntryDate",
   text: "EntryText",
 } as const;
@@ -66,3 +64,34 @@ export function objectValues<T extends Record<string, string>>(obj: T): string[]
 
 export const ISSUE_FIELD_NAMES = objectValues(ISSUE_FIELDS);
 export const PROGRESS_FIELD_NAMES = objectValues(PROGRESS_FIELDS);
+
+export const ISSUE_PERSON_FIELD_NAMES: string[] = [
+  ISSUE_FIELDS.createdBy,
+  ISSUE_FIELDS.taskOwner,
+  ISSUE_FIELDS.verifiedBy,
+];
+
+export const ISSUE_SCALAR_FIELD_NAMES = ISSUE_FIELD_NAMES.filter(
+  (name) => ISSUE_PERSON_FIELD_NAMES.indexOf(name) < 0
+);
+
+export const ISSUE_SELECT_FIELD_NAMES = ISSUE_SCALAR_FIELD_NAMES.concat(
+  ISSUE_PERSON_FIELD_NAMES.reduce<string[]>((all, name) => all.concat(
+    `${name}/Id`,
+    `${name}/Title`,
+    `${name}/EMail`,
+    `${name}/Name`
+  ), [])
+);
+
+export const PROGRESS_SCALAR_FIELD_NAMES = PROGRESS_FIELD_NAMES.filter(
+  (name) => name !== PROGRESS_FIELDS.author
+);
+
+export const PROGRESS_SELECT_FIELD_NAMES = PROGRESS_SCALAR_FIELD_NAMES.concat(
+  "FileDirRef", "FSObjType", "Created",
+  `${PROGRESS_FIELDS.author}/Id`,
+  `${PROGRESS_FIELDS.author}/Title`,
+  `${PROGRESS_FIELDS.author}/EMail`,
+  `${PROGRESS_FIELDS.author}/Name`
+);

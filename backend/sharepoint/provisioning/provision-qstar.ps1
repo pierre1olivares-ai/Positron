@@ -1,10 +1,10 @@
 <#
 =====================================================================
- Q-Star Issue Manager — SharePoint provisioning (PnP PowerShell)
+ Q-Star Issue Manager — production provisioning (PnP PowerShell)
 =====================================================================
- Creates the "Q-Star Issues" list and the "Q-Star Progress Log" child
- list with every column, internal name, choice value and index used by
- the Q-Star Issue Manager app. Idempotent: existing items are skipped.
+ Creates the Q-Star lists with every column, internal name, choice value
+ and index used by the app. See README.md for production permission
+ reconciliation and the separate beta profile.
 
  PREREQUISITES
    1. Install the module:      Install-Module PnP.PowerShell -Scope CurrentUser
@@ -14,8 +14,8 @@
 
  RUN
    ./provision-qstar.ps1 -SiteUrl "https://contoso.sharepoint.com/sites/Quality" -ClientId "<app-guid>"
-   # add -PersonAsText to store owners as text + email columns instead of
-   # proper Person columns (matches the test build's string model exactly).
+   # -RegionMigration Preview inspects legacy rows without writes.
+   # -RegionMigration Apply migrates them during a maintenance window.
 =====================================================================
 #>
 
@@ -26,10 +26,15 @@ param(
   [string]$IssuesList   = "Q-Star Issues",
   [string]$ProgressList = "Q-Star Progress Log",
   [string]$ConfigList   = "Q-Star Config",
-  [switch]$PersonAsText
+  [switch]$PersonAsText,
+  [switch]$SkipRoleGroups,
+  [ValidateSet("Preserve","Preview","Apply")][string]$RegionMigration = "Preserve",
+  [ValidateSet("Preserve","Preview","Apply")][string]$ProgressMigration = "Preserve"
 )
 
 $ErrorActionPreference = "Stop"
+if ($PersonAsText) { throw "PersonAsText is incompatible with the web part. Use native Person columns." }
+$regionSchema = Get-Content "$PSScriptRoot/region-schema.json" -Raw | ConvertFrom-Json -AsHashtable
 
 # ---------- Choice value sets (must match the app) ----------
 $SEVERITY   = "Critical","High","Medium","Low"
@@ -37,11 +42,13 @@ $STATUS     = "Created","In Progress","Under Testing/Revision","On Hold","Closed
 $TRANSFORM  = "OFI","NC Minor","NC Major","Only sent to Dept/BU for Action"   # add "REC" when adopted
 $DEVIATION  = "Communication","Compliance","Documentation","Equipment","Process","Quality","Safety","System"
 $ORIGIN     = "Customer Complaints or Claims","Internal Finding"
-$REGION     = "Americas (Miami)","Asia Pacific (Bangkok)","China (Shanghai)","Eastern Europe (Vienna)","France (Paris)","Head Office (Neu-Isenburg)","Western Europe (Amsterdam)"
+$REGION     = [string[]]$regionSchema.choices
 $YESNO      = "Yes","No"
 $BU = @(
   "BU Aftermarket","BU Airlines","BU Automotive","BU Diplo & High Security",
   "BU High Tech & SemiCon","BU Life Science","Central Europe & Commercial Services",
+  "Claims & Complaints","Customer Solution & Business Development",
+  "Digital Transformation & Data Management","Finance & Controlling","Human Resources",
   "IT","Legal & Data Protection","Marketing","Network & Products","Quality",
   "Risk Management","Strategy & Transformation","tmCT FRA","tmCT MUC","tmCT MEX/NLU","tmCT PVG"
 )  # extend to the full set used on your live form
@@ -49,6 +56,49 @@ $BU = @(
 # ---------- Connect ----------
 Write-Host "Connecting to $SiteUrl ..." -ForegroundColor Cyan
 Connect-PnPOnline -Url $SiteUrl -Interactive -ClientId $ClientId
+
+function Sync-Regions {
+  param([switch]$Preview)
+  $rows = @(Get-PnPListItem -List $IssuesList -Fields "Region" -PageSize 1000)
+  $changes = @($rows | Where-Object { $_["Region"] -and $regionSchema.aliases.ContainsKey([string]$_["Region"]) })
+  foreach ($row in $changes) { Write-Host "Region item $($row.Id): $($row['Region']) -> $($regionSchema.aliases[[string]$row['Region']])" }
+  if ($Preview) { Write-Host "Preview only: $($changes.Count) region changes; no writes performed."; return }
+  $field = Get-PnPField -List $IssuesList -Identity "Region"
+  $originalChoices = @(Get-PnPProperty -ClientObject $field -Property Choices)
+  $choices = @($REGION) + $originalChoices + @($rows | ForEach-Object { $_["Region"] } | Where-Object { $_ })
+  Set-PnPField -List $IssuesList -Identity "Region" -Values @{ Choices = [string[]]@($choices | Select-Object -Unique) } | Out-Null
+  if ($RegionMigration -eq "Apply") {
+    foreach ($row in $changes) {
+      Set-PnPListItem -List $IssuesList -Identity $row.Id -Values @{ Region = $regionSchema.aliases[[string]$row["Region"]] } -UpdateType SystemUpdate | Out-Null
+    }
+    $customChoices = @($choices | Where-Object { -not $regionSchema.aliases.ContainsKey([string]$_) })
+    Set-PnPField -List $IssuesList -Identity "Region" -Values @{ Choices = [string[]]@($customChoices | Select-Object -Unique) } | Out-Null
+  } elseif ($changes.Count) {
+    Write-Host "Legacy regions preserved. Review -RegionMigration Preview, then use Apply during maintenance."
+  }
+}
+if ($RegionMigration -eq "Preview") { Sync-Regions -Preview; return }
+$securityParameters = @{ SiteUrl = $SiteUrl; IssuesList = $IssuesList; ProgressList = $ProgressList; ConfigList = $ConfigList; Production = (-not $SkipRoleGroups); ProgressMigration = $ProgressMigration }
+if ($ProgressMigration -eq "Preview") { & "$PSScriptRoot/secure-qstar.ps1" @securityParameters; return }
+$progressPreflightDone = $false
+if (Get-PnPList -Identity $ProgressList -ErrorAction SilentlyContinue) {
+  & "$PSScriptRoot/secure-qstar.ps1" @securityParameters -Preflight
+  $progressPreflightDone = $true
+}
+
+# ---------- Role groups ----------
+function Ensure-RoleGroup {
+  param([string]$Name,[string]$Description,[string]$Role)
+  $group = Get-PnPGroup -Identity $Name -ErrorAction SilentlyContinue
+  if (-not $group) {
+    $group = New-PnPGroup -Title $Name -Description $Description
+    Write-Host "+ group '$Name'" -ForegroundColor Green
+  } else {
+    Write-Host "= group '$Name' exists" -ForegroundColor DarkGray
+  }
+  Set-PnPGroupPermissions -Identity $Name -AddRole $Role | Out-Null
+}
+
 
 # ---------- Helpers ----------
 function Ensure-List {
@@ -59,8 +109,8 @@ function Ensure-List {
     New-PnPList -Title $Title -Template GenericList -OnQuickLaunch | Out-Null
     Write-Host "+ list '$Title'" -ForegroundColor Green
   }
-  # Title column is unused as a headline here — make it optional.
-  try { Set-PnPField -List $Title -Identity "Title" -Values @{ Required = $false } -ErrorAction SilentlyContinue | Out-Null } catch {}
+  # Config and journal writes may omit Title; do not require it at the list level.
+  Set-PnPField -List $Title -Identity "Title" -Values @{ Required = $false } | Out-Null
 }
 
 function Ensure-Field {
@@ -70,7 +120,7 @@ function Ensure-Field {
     [string]$Default,[switch]$Index
   )
 
-  # Person handling: proper User column, or text + companion email column.
+  # PersonAsText is rejected at entry; native User columns are required by the data service.
   if ($Type -eq "Person") {
     if ($PersonAsText) {
       Ensure-Field -List $List -Display $Display -Internal $Internal -Type "Text" -AddToView:$AddToView
@@ -79,7 +129,9 @@ function Ensure-Field {
     } else { $Type = "User" }
   }
 
-  if (Get-PnPField -List $List -Identity $Internal -ErrorAction SilentlyContinue) {
+  $field = Get-PnPField -List $List -Identity $Internal -ErrorAction SilentlyContinue
+  if ($field) {
+    if ($field.TypeAsString -ne $Type) { throw "Field $List/$Internal is $($field.TypeAsString); expected $Type. Migrate it first; no data was converted." }
     Write-Host "  = $Internal" -ForegroundColor DarkGray
   } else {
     $p = @{ List = $List; DisplayName = $Display; InternalName = $Internal; Type = $Type }
@@ -92,11 +144,16 @@ function Ensure-Field {
 
   # Post-create tweaks
   $vals = @{}
+  if ($Choices) {
+    $oldChoices = if ($field) { @(Get-PnPProperty -ClientObject $field -Property Choices) } else { @() }
+    $vals.Choices = [string[]]@((@($Choices) + $oldChoices) | Select-Object -Unique)
+  }
+  if ($PSBoundParameters.ContainsKey("Required")) { $vals.Required = [bool]$Required }
   if ($Type -eq "Note")             { $vals.RichText = $false }      # plain multiline
   if ($DateOnly)                    { $vals.DisplayFormat = 0 }      # 0 = DateOnly
   if ($PSBoundParameters.ContainsKey("Default")) { $vals.DefaultValue = $Default }
   if ($Index)                       { $vals.Indexed = $true }
-  if ($vals.Count -gt 0) { try { Set-PnPField -List $List -Identity $Internal -Values $vals | Out-Null } catch { Write-Warning "  ! could not set props on $Internal: $($_.Exception.Message)" } }
+  if ($vals.Count -gt 0) { Set-PnPField -List $List -Identity $Internal -Values $vals | Out-Null }
 }
 
 # =====================================================================
@@ -106,7 +163,7 @@ Write-Host "`n--- $IssuesList ---" -ForegroundColor Cyan
 Ensure-List -Title $IssuesList
 
 # Intake fields
-Ensure-Field -List $IssuesList -Display "Qs Number"               -Internal "QsNumber"          -Type Number   -Required -AddToView
+Ensure-Field -List $IssuesList -Display "Qs Number"               -Internal "QsNumber"          -Type Number   -Required:$false -AddToView
 Ensure-Field -List $IssuesList -Display "Short Summary"           -Internal "ShortSummary"      -Type Text     -Required -AddToView
 Ensure-Field -List $IssuesList -Display "Description"             -Internal "Description"       -Type Note     -Required
 Ensure-Field -List $IssuesList -Display "Immediate Action taken"  -Internal "ImmediateAction"   -Type Note
@@ -129,6 +186,8 @@ Ensure-Field -List $IssuesList -Display "Task Created"            -Internal "Tas
 # New fields (owner assignment, escalation, §10.2, NC effectiveness test)
 Ensure-Field -List $IssuesList -Display "Triaged"                -Internal "Triaged"           -Type Choice -Choices $YESNO -Default "No" -AddToView -Index
 Ensure-Field -List $IssuesList -Display "Task Owner"             -Internal "TaskOwner"         -Type Person -AddToView
+Ensure-Field -List $IssuesList -Display "Reminder Cycle" -Internal "ReminderCycle" -Type Text
+Ensure-Field -List $IssuesList -Display "Permissioned Owner Email" -Internal "PermissionedOwnerEmail" -Type Text
 Ensure-Field -List $IssuesList -Display "Escalation BU"          -Internal "EscalationBU"      -Type Choice -Choices $BU
 Ensure-Field -List $IssuesList -Display "Due Date"               -Internal "DueDate"           -Type DateTime -DateOnly -AddToView -Index
 Ensure-Field -List $IssuesList -Display "Root Cause"             -Internal "RootCause"         -Type Note
@@ -145,20 +204,18 @@ Ensure-Field -List $IssuesList -Display "Owner Update"          -Internal "Owner
 Ensure-Field -List $IssuesList -Display "Owner Update At"       -Internal "OwnerUpdateAt"     -Type DateTime
 Ensure-Field -List $IssuesList -Display "Owner Update Text"     -Internal "OwnerUpdateText"   -Type Note
 
-# Make sure Status has the new "Under Testing/Revision" value even if the list pre-existed
-try { Set-PnPField -List $IssuesList -Identity "Status" -Values @{ Choices = [string[]]$STATUS } | Out-Null }
-catch { Write-Warning "Could not update Status choices automatically — add 'Under Testing/Revision' manually if missing." }
+Sync-Regions
 
 # =====================================================================
 #  Q-Star Progress Log (append-only child list)
 # =====================================================================
 Write-Host "`n--- $ProgressList ---" -ForegroundColor Cyan
 Ensure-List -Title $ProgressList
-Ensure-Field -List $ProgressList -Display "Parent Item Id" -Internal "ParentItemId" -Type Number   -Required -AddToView -Index
+Ensure-Field -List $ProgressList -Display "Parent Item Id" -Internal "ParentItemId" -Type Number   -Required:$false -AddToView -Index
 Ensure-Field -List $ProgressList -Display "Author"         -Internal "Author"       -Type Person   -AddToView
 Ensure-Field -List $ProgressList -Display "Entry Date"     -Internal "EntryDate"    -Type DateTime -AddToView
 Ensure-Field -List $ProgressList -Display "Text"           -Internal "EntryText"    -Type Note     -Required
-Write-Host "  (enforce append-only by only ever creating items in this list — never edit them)" -ForegroundColor DarkGray
+
 
 # =====================================================================
 #  Q-Star Config (single-item settings store for the IT-settings tab)
@@ -166,6 +223,48 @@ Write-Host "  (enforce append-only by only ever creating items in this list — 
 Write-Host "`n--- $ConfigList ---" -ForegroundColor Cyan
 Ensure-List -Title $ConfigList
 Ensure-Field -List $ConfigList -Display "Settings JSON" -Internal "SettingsJson" -Type Note
+Ensure-Field -List $ConfigList -Display "Reference Offset" -Internal "ReferenceOffset" -Type Number
+$settings = @(Get-PnPListItem -List $ConfigList -Fields "ReferenceOffset" -PageSize 1000)
+if ($settings.Count -gt 1) { throw "$ConfigList must contain one settings item; reconcile duplicates before provisioning." }
+if ($settings.Count -eq 1 -and $null -ne $settings[0]["ReferenceOffset"]) {
+  $offset = [double]$settings[0]["ReferenceOffset"]
+  if ($offset -lt 1000 -or $offset -ne [math]::Floor($offset)) { throw "Existing ReferenceOffset is invalid; it was not overwritten." }
+  Write-Host "ReferenceOffset $offset preserved (immutable after first use)."
+} else {
+  $offset = 1000
+  foreach ($row in @(Get-PnPListItem -List $IssuesList -Fields "QsNumber" -PageSize 1000)) {
+    if ($null -eq $row["QsNumber"]) { continue }
+    $number = [double]$row["QsNumber"]
+    if ($number -lt 0 -or $number -ne [math]::Floor($number)) { throw "Invalid legacy QsNumber on item $($row.Id); resolve before allocating references." }
+    $offset = [math]::Max($offset, $number)
+  }
+  if ($settings.Count) {
+    Set-PnPListItem -List $ConfigList -Identity $settings[0].Id -Values @{ ReferenceOffset = $offset } | Out-Null
+  } else {
+    Add-PnPListItem -List $ConfigList -Values @{ Title = "Q-Star Settings"; ReferenceOffset = $offset } | Out-Null
+  }
+  Write-Host "ReferenceOffset initialized to $offset; existing QS references were not changed."
+}
+
+# Validate existing history before changing any permission assignments.
+if (-not $progressPreflightDone) { & "$PSScriptRoot/secure-qstar.ps1" @securityParameters -Preflight }
+if (-not $SkipRoleGroups) {
+  Write-Host "`n--- Q-Star role groups ---" -ForegroundColor Cyan
+  Ensure-RoleGroup -Name "Q-Star Admins" -Description "Q-Star application administrators" -Role "Full Control"
+  Ensure-RoleGroup -Name "Q-Star Quality Managers" -Description "Q-Star Quality Managers" -Role "Edit"
+  Ensure-RoleGroup -Name "Q-Star Task Owners" -Description "Q-Star task owners" -Role "Read"
+  Ensure-RoleGroup -Name "Q-Star Readers" -Description "Q-Star read-only users" -Role "Read"
+} else {
+  Write-Host "`n--- Q-Star role groups skipped by beta entry point ---" -ForegroundColor Yellow
+}
+
+& "$PSScriptRoot/secure-qstar.ps1" @securityParameters
 
 Write-Host "`nDone. Lists provisioned on $SiteUrl." -ForegroundColor Green
-Write-Host "Next: point the app's Graph data layer at these lists, then build the intake + reminder flows."
+if ($SkipRoleGroups) {
+  Write-Host "Beta profile complete: no Q-Star groups or role assignments were created." -ForegroundColor Yellow
+  Write-Host "Next: enable Beta access mode on the web part and use the site's existing Owners, Members, and Visitors."
+} else {
+  Write-Host "Production profile complete: list, issue, and journal-folder permissions reconciled." -ForegroundColor Green
+  Write-Host "Next: add users or Entra groups to the Q-Star groups and configure the assignment-permission, intake, and reminder flows."
+}

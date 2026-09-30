@@ -22,7 +22,8 @@
     "description": { "default": "Q-Star Issue Manager - ISO 9001 quality issue tracker" },
     "officeFabricIconFontName": "Page",
     "properties": {
-      "description": "QstarIssueManager"
+      "description": "QstarIssueManager",
+      "betaAccessMode": true
     }
   }]
 }

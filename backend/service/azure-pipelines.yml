@@ -1,53 +1,65 @@
 pool:
   vmImage: 'ubuntu-latest'
 
+# Local validation does not run this pipeline or publish an image. IT configures
+# the registry service connection and the host variable before using it.
 variables:
   projectName: 'qstar-issue-manager-backend'
 
 steps:
-  - task: Gradle@2
+  - task: JavaToolInstaller@0
     inputs:
-      gradleWrapperFile: 'gradlew'
+      versionSpec: '21'
+      jdkArchitectureOption: 'x64'
+      jdkSourceOption: 'PreInstalled'
+
+  - task: Gradle@4
+    inputs:
+      gradleWrapperFile: 'backend/service/gradlew'
+      workingDirectory: 'backend/service'
       tasks: 'build'
       publishJUnitResults: true
-      testResultsFiles: '**/TEST-*.xml'
-      jdkVersionOption: 1.11
+      testResultsFiles: 'backend/service/build/test-results/test/TEST-*.xml'
+      javaHomeOption: 'Path'
+      jdkDirectory: '$(JAVA_HOME)'
       sonarQubeRunAnalysis: false
 
-  - script: |
-      export dateNow="$(date "+%Y-%m-%d_%H-%M-%S")"
-      export gitSHA1=$(Build.SourceVersion)
-      export imageTag=$(Build.SourceVersion)
-
+  - bash: |
+      set -euo pipefail
+      dateNow="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
       echo "##vso[task.setvariable variable=dateNow]$dateNow"
-      echo "##vso[task.setvariable variable=gitSHA1]$gitSHA1"
-      echo "##vso[task.setvariable variable=imageTag]$imageTag"
-    displayName: 'Set Buildscript Variables'
+      echo "##vso[task.setvariable variable=imageTag]$BUILD_SOURCEVERSION"
+    displayName: 'Set image metadata'
 
   - task: Docker@2
-    displayName: Push Image to Registry
+    displayName: 'Build and push backend image'
     inputs:
       command: buildAndPush
       containerRegistry: Docker Registry
-      Dockerfile: $(Build.Repository.LocalPath)/Dockerfile
+      Dockerfile: '$(Build.SourcesDirectory)/backend/service/Dockerfile'
+      buildContext: '$(Build.SourcesDirectory)/backend/service'
       repository: qstar-issue-manager-backend
       tags: |
-        latest
         $(imageTag)
 
-  - script: |
-      export extractedVersion=$(extractedVersion)
-      export gitSHA1=$(gitSHA1)
-      export dateNow=$(dateNow)
-      export imageTag=$(imageTag)
-      export appVersion=$(appVersion)
+  - bash: |
+      set -euo pipefail
+      test -n "$host"
+      if [[ "$host" == *'$('* || "$host" == *'/'* ]]; then
+        echo 'Set the pipeline host variable to the intended DNS hostname.' >&2
+        exit 1
+      fi
+      envsubst '$dateNow $gitSHA1 $imageTag $host' < kubernetes.yaml > kubernetes_out.yaml
+    workingDirectory: '$(Build.SourcesDirectory)/backend/service'
+    env:
+      dateNow: $(dateNow)
+      gitSHA1: $(Build.SourceVersion)
+      imageTag: $(imageTag)
+      host: $(host)
+    displayName: 'Prepare deployment manifest (does not apply it)'
 
-      envsubst '$dateNow:$appVersion:$gitSHA1:$imageTag' < $(Build.Repository.LocalPath)/kubernetes.yaml > $(Build.Repository.LocalPath)/kubernetes_out.yaml
-      cat $(Build.Repository.LocalPath)/kubernetes_out.yaml
-    displayName: 'Prepare kubernetes.yaml'
-
-  - task: PublishPipelineArtifact@0
-    displayName: 'Publish kubernetes.yaml'
+  - task: PublishPipelineArtifact@1
+    displayName: 'Publish deployment manifest'
     inputs:
       artifactName: 'kubernetesYAML'
-      targetPath: '$(Build.Repository.LocalPath)/kubernetes_out.yaml'
+      targetPath: '$(Build.SourcesDirectory)/backend/service/kubernetes_out.yaml'

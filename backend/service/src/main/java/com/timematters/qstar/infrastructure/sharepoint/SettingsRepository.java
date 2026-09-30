@@ -2,64 +2,54 @@ package com.timematters.qstar.infrastructure.sharepoint;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.model.Settings;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
 
-/**
- * Reads/writes the IT-settings tab's configuration from the single-item "Q-Star Config" list
- * (column SettingsJson holds the whole object as JSON) — the same list and shape
- * frontend/src/webparts/qstarIssueManager/services/SharePointDataService.ts uses when running
- * without this backend.
- */
 @Repository
 public class SettingsRepository {
+    private final SharePointRestClient client;
+    private final SharePointProperties properties;
+    private final ObjectMapper json = new ObjectMapper();
 
-    private static final String CONFIG_LIST_NAME = "Q-Star Config";
-    private static final String SETTINGS_JSON_FIELD = "SettingsJson";
+    public SettingsRepository(SharePointRestClient client, SharePointProperties properties) {
+        this.client = client;
+        this.properties = properties;
+    }
 
-    private final SharePointGraphClient graphClient;
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    @Autowired
-    public SettingsRepository(SharePointGraphClient graphClient) {
-        this.graphClient = graphClient;
+    private Map<String, Object> config() {
+        var items = client.getItems(properties.getConfigListName(), "$select=Id,SettingsJson");
+        if (items.size() != 1)
+            throw new IllegalStateException("Exactly one provisioned Config item is required.");
+        return items.getFirst();
     }
 
     public Settings load() {
-        String listId = graphClient.getListId(CONFIG_LIST_NAME);
-        List<Map<String, Object>> items = graphClient.getAllItems(listId);
-        if (items.isEmpty()) {
-            return new Settings();
-        }
-        Object json = items.get(0).get(SETTINGS_JSON_FIELD);
-        if (json == null) {
-            return new Settings();
-        }
+        Object stored = config().get("SettingsJson");
+        if (stored == null || stored.toString().isBlank()) return new Settings();
         try {
-            return objectMapper.readValue(json.toString(), Settings.class);
+            return json.readValue(stored.toString(), Settings.class);
         } catch (Exception e) {
-            return new Settings();
+            throw new IllegalStateException("Stored settings could not be read.", e);
         }
     }
 
     public Settings save(Settings settings) {
-        String listId = graphClient.getListId(CONFIG_LIST_NAME);
-        List<Map<String, Object>> items = graphClient.getAllItems(listId);
-        String json;
+        var item = config();
+        long id = IssueRepository.number(item.get("Id"));
+        String eTag = IssueRepository.eTag(item);
+        if (eTag == null)
+            eTag =
+                    IssueRepository.eTag(
+                            client.getItem(properties.getConfigListName(), id, "$select=Id"));
         try {
-            json = objectMapper.writeValueAsString(settings);
-        } catch (Exception e) {
-            throw new IllegalStateException("Could not serialize settings.", e);
-        }
-        Map<String, Object> fields = new HashMap<>();
-        fields.put(SETTINGS_JSON_FIELD, json);
-        if (items.isEmpty()) {
-            graphClient.createItem(listId, fields);
-        } else {
-            graphClient.updateItemFields(listId, items.get(0).get("Id").toString(), fields);
+            // Scalar ReferenceOffset is immutable and is never part of this update.
+            client.updateItem(
+                    properties.getConfigListName(),
+                    id,
+                    Map.of("SettingsJson", json.writeValueAsString(settings)),
+                    eTag);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalArgumentException("Invalid settings.", e);
         }
         return settings;
     }

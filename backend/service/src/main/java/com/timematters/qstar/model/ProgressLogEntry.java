@@ -8,7 +8,11 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class ProgressLogEntry {
+    private Long id;
     private String ts;
     private String author;
+    private Long authorId;
+    private String authorEmail;
     private String text;
+    private String saveWarning;
 }

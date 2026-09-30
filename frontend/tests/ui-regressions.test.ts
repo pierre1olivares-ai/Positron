@@ -1,0 +1,3017 @@
+import assert from "node:assert/strict";
+import { after, afterEach, beforeEach, test } from "node:test";
+import type { IIssue, IProgressLogEntry } from "../src/webparts/qstarIssueManager/models/IIssue";
+import { AcceptedWriteError, IssueConflictError, IssueRefreshError } from "../src/webparts/qstarIssueManager/services/issueErrors";
+import { addCalendarDays, todayDate } from "../src/webparts/qstarIssueManager/domain/calendarDates";
+import { sharePointHttpHarness } from "./sharepoint-http-harness";
+
+const { JSDOM } = require("jsdom");
+const dom = new JSDOM("<!doctype html><html><body></body></html>", { url: "http://localhost/" });
+Object.defineProperty(globalThis, "window", { value: dom.window, configurable: true });
+Object.defineProperty(globalThis, "document", { value: dom.window.document, configurable: true });
+Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, configurable: true });
+// React 17's browser scheduler must not leave a Node MessageChannel alive after tests.
+Object.defineProperty(globalThis, "MessageChannel", { value: undefined, configurable: true });
+dom.window.requestAnimationFrame = (callback: (timestamp: number) => void) => setTimeout(() => callback(Date.now()), 1);
+dom.window.cancelAnimationFrame = clearTimeout;
+Object.defineProperty(globalThis, "requestAnimationFrame", { value: dom.window.requestAnimationFrame, configurable: true });
+Object.defineProperty(globalThis, "cancelAnimationFrame", { value: clearTimeout, configurable: true });
+// jsdom has no layout engine; provide stable geometry for the real chart components.
+Object.defineProperty(globalThis, "ResizeObserver", { value: class {
+  public observe(): void { /* fixed test viewport */ }
+  public unobserve(): void { /* fixed test viewport */ }
+  public disconnect(): void { /* no live observation */ }
+}, configurable: true });
+dom.window.HTMLElement.prototype.getBoundingClientRect = () => ({ width: 1024, height: 600, left: 0, top: 0, right: 1024, bottom: 600, x: 0, y: 0, toJSON: () => ({}) });
+
+const React = require("react") as typeof import("react");
+const ReactDOM = require("react-dom") as typeof import("react-dom");
+const { act, Simulate } = require("react-dom/test-utils") as typeof import("react-dom/test-utils");
+// SPFx generates .scss.ts shims; skip styles before tsx resolves those build shims.
+const Module = require("node:module");
+const originalLoad = Module._load;
+Module._load = function (request: string, ...args: unknown[]): unknown {
+  return /\.(scss|css)$/.test(request) ? {} : request === "@microsoft/sp-http" ? { AadHttpClient: { configurations: { v1: {} } } } : originalLoad.call(this, request, ...args);
+};
+const {
+  default: App, QMIssueDetail, OwnerIssueDetail, TriageForm, triageDefaults, ReporterForm, ProgressLog, SettingsView, Dashboard,
+} = require("../src/webparts/qstarIssueManager/components/QstarPrototype");
+const { BackendApiDataService } = require("../src/webparts/qstarIssueManager/services/BackendApiDataService");
+const { default: QstarIssueManager } = require("../src/webparts/qstarIssueManager/components/QstarIssueManager");
+Module._load = originalLoad;
+
+let container: HTMLDivElement;
+
+beforeEach(() => {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+});
+
+afterEach(() => {
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  container.remove();
+});
+
+after(() => { dom.window.close(); });
+
+function issue(overrides: Partial<IIssue> = {}): IIssue {
+  return {
+    id: 1, qsNumber: 1001, eTag: '"1"', triaged: true, status: "In Progress", taskCreated: "Yes", transformedInto: "NC Minor",
+    shortSummary: "Cold-chain breach", description: "Logger recorded an excursion", immediateAction: "Quarantine", severity: "High",
+    createdBy: "Reporter", reportDate: "2026-06-01", departmentBU: "Quality", region: "Western Europe (Amsterdam)", alreadyInContact: "Yes",
+    deviationType: "Quality", issueOrigin: "Internal Finding", additionalComments: "", followUp: "", taskOwner: "Owner", taskOwnerId: 7,
+    taskOwnerEmail: "owner@example.com", ownerBU: "Quality", dueDate: "2026-07-01", rootCause: "", correctiveAction: "", implementationDate: "",
+    effectivenessCheck: "", verifiedBy: "", verifiedDate: "", closedDate: "", closedAt: "", holdReason: "", holdUntil: "", ownerUpdate: false,
+    ownerUpdateAt: "", ownerUpdateText: "", reminderCycle: "initial", attachments: [], progressLog: [], ...overrides,
+  };
+}
+
+function ControlledEditor({ component: Component, input }: { component: React.ElementType; input: any }): React.ReactElement {
+  const cleanBaseline = (value: IIssue) => Component === TriageForm ? triageDefaults(value) : value;
+  const [saved, setSaved] = React.useState(input.issue);
+  const [draft, setDraft] = React.useState({ baseline: cleanBaseline(input.issue), fields: {} as Record<string, unknown> });
+  const [progress, setProgress] = React.useState("");
+  React.useEffect(() => {
+    setSaved(input.issue);
+    setDraft(current => Object.keys(current.fields).length ? current : { baseline: cleanBaseline(input.issue), fields: {} });
+  }, [input.issue]);
+  const accept = (value: IIssue, patch: Partial<IIssue>, dispatched: Record<string, unknown>) => {
+    setSaved(value);
+    setDraft(current => {
+      const fields = { ...current.fields };
+      for (const key of Object.keys(patch)) if (fields[key] === dispatched[key]) delete fields[key];
+      return { baseline: value, fields };
+    });
+  };
+  const onUpdate = async (id: number, patch: Partial<IIssue>, eTag: string) => {
+    const dispatched = draft.fields;
+    try {
+      const result = await (Component === TriageForm ? input.onTriage(id, patch, eTag) : input.onUpdate(id, patch, eTag));
+      accept(result || { ...draft.baseline, ...patch }, patch, dispatched);
+      return result;
+    } catch (error) {
+      if (error instanceof IssueRefreshError) accept({ ...draft.baseline, ...patch, eTag: undefined }, patch, dispatched);
+      throw error;
+    }
+  };
+  const submitProgress = async (...args: any[]) => {
+    const dispatched = progress;
+    try {
+      const result = await (Component === ProgressLog ? input.onAdd(...args) : input.onAddProgress(...args));
+      setProgress(current => current === dispatched ? "" : current);
+      return result;
+    } catch (error) {
+      if (error instanceof AcceptedWriteError) setProgress(current => current === dispatched ? "" : current);
+      throw error;
+    }
+  };
+  const onReload = async (id: number, keep: boolean) => {
+    const value = await input.onReload(id, keep);
+    setSaved(value);
+    setDraft(current => ({ baseline: value, fields: keep ? current.fields : {} }));
+    return value;
+  };
+  const onDraftChange = (id: number, part: string, value: any) => {
+    if (part === "progress") setProgress(value);
+    if (part === "detail" || part === "owner" || part === "triage") setDraft(value);
+    input.onDraftChange?.(id, part, value);
+  };
+  return React.createElement(Component, { ...input, issue: saved, ownerDraft: draft, detailDraft: draft, triageDraft: draft, text: progress, progressDraft: progress,
+    onUpdate, onTriage: onUpdate, onReload, onAdd: submitProgress, onAddProgress: submitProgress,
+    onDraftChange: Component === ProgressLog ? setProgress : onDraftChange });
+}
+
+function render(component: React.ElementType, props: object): void {
+  const controlled = [QMIssueDetail, OwnerIssueDetail, TriageForm, ProgressLog].includes(component);
+  act(() => { ReactDOM.render(controlled ? React.createElement(ControlledEditor, { component, input: props }) : React.createElement(component, props), container); });
+}
+
+function field(label: string): HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement {
+  const wrapper = Array.from(container.querySelectorAll("label")).find(candidate => candidate.firstElementChild?.textContent === label);
+  assert.ok(wrapper, `Field ${label} should be rendered`);
+  const input = wrapper.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>("input,select,textarea");
+  assert.ok(input);
+  return input;
+}
+
+function change(label: string, value: string): void {
+  assert.equal(field(label).disabled, false, `Field ${label} should be enabled`);
+  act(() => { Simulate.change(field(label), { target: { value } } as never); });
+}
+
+function button(text: string): HTMLButtonElement {
+  const result = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent === text);
+  assert.ok(result, `Button ${text} should be rendered`);
+  return result;
+}
+
+async function click(text: string): Promise<void> {
+  const target = button(text);
+  assert.equal(target.disabled, false, `Button ${text} should be enabled`);
+  await act(async () => { Simulate.click(target); });
+}
+
+function qmProps(overrides: object = {}): object {
+  return { issue: issue(), onBack: () => undefined, onAddProgress: async () => undefined, onReload: async () => issue(), author: "Quality Manager", ...overrides };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function assertFieldsDisabled(disabled: boolean): void {
+  const inputs = container.querySelectorAll<HTMLInputElement>("label input, label select, label textarea");
+  assert.ok(inputs.length);
+  for (const input of Array.from(inputs)) {
+    if (!input.readOnly) assert.equal(input.disabled, disabled, input.closest("label")?.textContent || "Editable field");
+  }
+}
+
+function fillReport(): void {
+  change("Short summary *", "Temperature excursion");
+  change("Description *", "Shipment arrived outside the allowed range");
+  change("Severity *", "High");
+  change("Department / Business Unit *", "Quality");
+  change("Region *", "Western Europe (Amsterdam)");
+  change("Deviation type *", "Quality");
+  change("Where does it come from? *", "Internal Finding");
+}
+
+test("QM locks its detail and progress forms during a save and retains both drafts", async () => {
+  const pending = deferred<IIssue>();
+  let writes = 0;
+  render(QMIssueDetail, qmProps({ issue: issue({ verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com" }), onUpdate: () => { writes += 1; return pending.promise; } }));
+  change("Follow up (Quality Team notes)", "Submitted note");
+  writeProgress("Independent progress draft");
+  await click("Save changes");
+  assertFieldsDisabled(true);
+  const progress = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
+  assert.ok(progress);
+  assert.equal(progress.disabled, true);
+  act(() => { button("Saving…").click(); });
+  await act(async () => { pending.resolve(issue({ followUp: "Submitted note", eTag: '"2"' })); });
+  assertFieldsDisabled(false);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Submitted note");
+  assert.equal(progress.value, "Independent progress draft");
+  assert.equal(button("Save changes").disabled, true);
+  assert.equal(writes, 1);
+});
+
+for (const transformedInto of ["NC Minor", "OFI"] as const) {
+  test(`owner ${transformedInto} form locks task fields and progress during submission`, async () => {
+    const pending = deferred<IIssue>();
+    const original = issue({ transformedInto, status: "Created" });
+    render(OwnerIssueDetail, { issue: original, owner: "Owner", onBack: () => undefined, onAddProgress: async () => undefined, onUpdate: () => pending.promise });
+    change("Status", "In Progress");
+    if (transformedInto === "NC Minor") change("Implementation date", todayDate());
+    await click(transformedInto === "NC Minor" ? "Save progress" : "Save");
+    assertFieldsDisabled(true);
+    assert.equal(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled, true);
+    await act(async () => { pending.resolve({ ...original, status: "In Progress", implementationDate: todayDate(), eTag: '"2"' }); });
+    assertFieldsDisabled(false);
+    assert.equal(field("Status").value, "In Progress");
+    if (transformedInto === "NC Minor") assert.equal(field("Implementation date").value, todayDate());
+  });
+}
+
+test("triage locks assignment fields until a rejected request returns its draft", async () => {
+  const pending = deferred<IIssue>();
+  render(TriageForm, { issue: issue({ triaged: false }), onBack: () => undefined, onTriage: () => pending.promise });
+  change("Task owner (gets reminders)", "New Owner");
+  change("Task owner Microsoft 365 email", "new@example.com");
+  change("Follow up note (optional)", "Submitted triage note");
+  await click("Create issue");
+  assertFieldsDisabled(true);
+  assert.equal(button("Create issue").disabled, true);
+  await act(async () => { pending.reject(new Error("Write rejected")); });
+  assertFieldsDisabled(false);
+  assert.equal(field("Follow up note (optional)").value, "Submitted triage note");
+  assert.equal(button("Create issue").disabled, false);
+});
+
+test("reporter locks its form during creation and shows one accepted reference", async () => {
+  const pending = deferred<number>();
+  let creates = 0;
+  render(ReporterForm, { reporterName: "Reporter", settings: {}, onSubmit: () => { creates += 1; return pending.promise; } });
+  fillReport();
+  await click("Submit report");
+  assertFieldsDisabled(true);
+  act(() => { button("Submitting…").click(); });
+  await act(async () => { pending.resolve(3010); });
+  assert.match(container.textContent || "", /Report submitted.*QS-3010/);
+  assert.equal(creates, 1);
+  await click("Report another");
+  assertFieldsDisabled(false);
+  assert.equal(field("Short summary *").value, "");
+});
+
+test("settings lock link edits during save while diagnostics remain available", async () => {
+  const pending = deferred<void>();
+  function SettingsHarness(): React.ReactElement {
+    const [settings, setSettings] = React.useState({ msFormUrl: "", flowId: "" });
+    return React.createElement(SettingsView, { settings, onRunDiagnostics: async () => [], onSave: async (next: typeof settings) => { await pending.promise; setSettings(next); } });
+  }
+  render(SettingsHarness, {});
+  change("Q-Star Microsoft Form URL", "https://forms.office.com/new");
+  await click("Save settings");
+  assertFieldsDisabled(true);
+  assert.equal(button("Run connection test").disabled, false);
+  await act(async () => { pending.resolve(); });
+  assertFieldsDisabled(false);
+  assert.equal(field("Q-Star Microsoft Form URL").value, "https://forms.office.com/new");
+  assert.equal(button("Save settings").disabled, true);
+});
+
+test("a pending append locks the issue while retaining its unsaved QM draft", async () => {
+  const pending = deferred<IProgressLogEntry>();
+  let appends = 0;
+  await renderApp({ addProgressLogEntry: () => { appends += 1; return pending.promise; } });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Independent QM draft");
+  const progress = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
+  assert.ok(progress);
+  act(() => { Simulate.change(progress, { target: { value: "Completed mitigation" } } as never); });
+  await click("Add update");
+  assert.equal(progress.disabled, true);
+  assertFieldsDisabled(true);
+  assert.equal(button("Save changes").disabled, true);
+  act(() => { button("Saving…").click(); });
+  await act(async () => { pending.resolve({ text: "Completed mitigation", author: "Quality Manager", ts: new Date().toISOString() }); });
+  assert.equal(progress.disabled, false);
+  assertFieldsDisabled(false);
+  assert.equal(progress.value, "");
+  assert.equal(field("Follow up (Quality Team notes)").value, "Independent QM draft");
+  assert.equal(appends, 1);
+});
+
+for (const component of [QMIssueDetail, OwnerIssueDetail]) {
+  test(`${component.name} holds lock reason and date until persistence finishes`, async () => {
+    const pending = deferred<IIssue>();
+    render(component, { ...qmProps(), owner: "Owner", onUpdate: () => pending.promise });
+    await click("Put on hold");
+    change("Reason for hold *", "Waiting for parts");
+    const until = addCalendarDays(todayDate(), 7);
+    change("Resume work on *", until);
+    const confirms = Array.from(container.querySelectorAll("button")).filter(candidate => candidate.textContent === "Put on hold");
+    await act(async () => { Simulate.click(confirms[confirms.length - 1]); });
+    assertFieldsDisabled(true);
+    assert.equal(button("Cancel").disabled, true);
+    await act(async () => { pending.reject(new Error("Write rejected")); });
+    assertFieldsDisabled(false);
+    assert.equal(field("Reason for hold *").value, "Waiting for parts");
+    assert.equal(field("Resume work on *").value, until);
+  });
+}
+
+test("the status dropdown cannot close an NC before its effectiveness test", async () => {
+  let calls = 0;
+  render(QMIssueDetail, qmProps({ onUpdate: async () => { calls += 1; return issue(); } }));
+  change("Status", "Closed");
+  await click("Save changes");
+  assert.equal(calls, 0);
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /2-month effectiveness test/);
+  assert.equal(field("Status").value, "Closed", "rejected saves retain the user's draft");
+});
+
+test("Verify and close completes an OFI without inaccessible NC verifier fields", async () => {
+  const original = issue({ transformedInto: "OFI" });
+  let saved: Partial<IIssue> | undefined;
+  render(QMIssueDetail, qmProps({ issue: original, onUpdate: async (_id: number, patch: Partial<IIssue>) => { saved = patch; return { ...original, ...patch }; } }));
+  assert.equal(Array.from(container.querySelectorAll("label")).some(label => label.firstElementChild?.textContent === "Verified by"), false);
+  await click("Verify & close");
+  assert.equal(saved?.status, "Closed");
+  assert.equal(saved?.closedDate, todayDate());
+  assert.ok(saved?.closedAt);
+  assert.equal(container.querySelector('[role="alert"]'), null);
+});
+
+test("starting an effectiveness test updates the draft before a subsequent note save", async () => {
+  let stored = issue();
+  const calls: { patch: Partial<IIssue>; eTag: string }[] = [];
+  render(QMIssueDetail, qmProps({ issue: stored, onUpdate: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+    calls.push({ patch, eTag });
+    stored = { ...stored, ...patch, eTag: `"${calls.length + 1}"` };
+    return stored;
+  } }));
+  await click("Start 2-month effectiveness test");
+  assert.equal(field("Status").value, "Under Testing/Revision");
+  assert.equal(field("Implementation date").value, todayDate());
+  assert.equal(button("Save changes").disabled, true);
+  change("Follow up (Quality Team notes)", "Observe the next shipment");
+  await click("Save changes");
+  assert.deepEqual(calls[1], { patch: { followUp: "Observe the next shipment" }, eTag: '"2"' });
+  assert.equal(stored.status, "Under Testing/Revision");
+  assert.equal(stored.implementationDate, todayDate());
+});
+
+test("a conflict retains the QM draft until the explicit reload action", async () => {
+  const latest = issue({ followUp: "Another manager's note", taskOwner: "New owner", taskOwnerEmail: "new@example.com", eTag: '"2"' });
+  let reloads = 0;
+  render(QMIssueDetail, qmProps({
+    onUpdate: async () => { throw new IssueConflictError(1, latest); },
+    onReload: async () => { reloads += 1; return latest; },
+  }));
+  change("Follow up (Quality Team notes)", "My unsaved note");
+  await click("Save changes");
+  assert.equal(field("Follow up (Quality Team notes)").value, "My unsaved note");
+  assert.equal(button("Save changes").disabled, true);
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /draft has been kept/);
+  await click("Reload latest and discard draft");
+  assert.equal(reloads, 1);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Another manager's note");
+  assert.equal(field("Task owner").value, "New owner");
+  assert.equal(container.querySelector('[role="alert"]'), null);
+});
+
+test("a newly created fallback record can acquire its missing version while keeping a new draft", async () => {
+  const fallback = issue({ eTag: undefined });
+  const latest = issue({ followUp: "Saved during intake", eTag: '"7"' });
+  let reloads = 0;
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  render(QMIssueDetail, qmProps({
+    issue: fallback,
+    onReload: async (id: number, keepDraft: boolean) => { assert.equal(id, fallback.id); assert.equal(keepDraft, true); reloads += 1; return latest; },
+    onUpdate: async (_id: number, patch: Partial<IIssue>, eTag: string) => { writes.push({ patch, eTag }); return { ...latest, ...patch, eTag: '"8"' }; },
+  }));
+  change("Follow up (Quality Team notes)", "Draft before recovery");
+  assert.equal(button("Save changes").disabled, true);
+  assert.equal(button("Start 2-month effectiveness test").disabled, true);
+  assert.equal(writes.length, 0);
+  await click("Reload latest and keep draft");
+  assert.equal(reloads, 1);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Draft before recovery");
+  assert.equal(hasButton("Reload latest and keep draft"), false);
+  change("Follow up (Quality Team notes)", "Ready after recovery");
+  await click("Save changes");
+  assert.deepEqual(writes, [{ patch: { followUp: "Ready after recovery" }, eTag: '"7"' }]);
+});
+
+test("a failed progress submission preserves text for a successful retry", async () => {
+  let fail = true;
+  const accepted: string[] = [];
+  render(ProgressLog, { entries: [], canAdd: true, author: "Owner", onAdd: async (entry: { text: string }) => {
+    if (fail) throw new Error("Connection unavailable");
+    accepted.push(entry.text);
+  } });
+  const input = container.querySelector("textarea");
+  assert.ok(input);
+  act(() => { Simulate.change(input, { target: { value: "Mitigation completed; evidence attached elsewhere." } } as never); });
+  await click("Add update");
+  assert.equal(input.value, "Mitigation completed; evidence attached elsewhere.");
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Connection unavailable/);
+  fail = false;
+  await click("Add update");
+  assert.deepEqual(accepted, ["Mitigation completed; evidence attached elsewhere."]);
+  assert.equal(input.value, "");
+});
+
+test("an owner can retry a failed test-start without losing the implementation date", async () => {
+  let fail = true;
+  let journalWrites = 0;
+  let stored = issue();
+  const date = addCalendarDays(todayDate(), -7);
+  function OwnerHarness(): React.ReactElement {
+    const [current, setCurrent] = React.useState(stored);
+    return React.createElement(ControlledEditor, { component: OwnerIssueDetail, input: {
+      issue: current, owner: "Owner", onBack: () => undefined,
+      onAddProgress: async () => { journalWrites += 1; },
+      onUpdate: async (_id: number, patch: Partial<IIssue>) => {
+        if (fail) throw new Error("Temporary write failure");
+        stored = { ...stored, ...patch, eTag: '"2"' };
+        setCurrent(stored);
+        return stored;
+      },
+    } });
+  }
+  render(OwnerHarness, {});
+  change("Implementation date", date);
+  await click("Mitigation implemented — start 2-month test");
+  assert.equal(field("Implementation date").value, date);
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Temporary write failure/);
+  assert.equal(stored.status, "In Progress");
+  assert.equal(journalWrites, 0);
+  fail = false;
+  await click("Mitigation implemented — start 2-month test");
+  assert.equal(stored.status, "Under Testing/Revision");
+  assert.equal(stored.implementationDate, date);
+  assert.match(container.textContent || "", /Your mitigation is in its 2-month effectiveness test/);
+});
+
+test("a failed triage save retains assignment and follow-up fields", async () => {
+  let exits = 0;
+  render(TriageForm, { issue: issue({ triaged: false, status: undefined }), onBack: () => { exits += 1; }, onTriage: async () => { throw new Error("SharePoint unavailable"); } });
+  change("Task owner (gets reminders)", "New Owner");
+  change("Task owner Microsoft 365 email", "new@example.com");
+  change("Follow up note (optional)", "Review with the customer");
+  await click("Create issue");
+  assert.equal(exits, 0);
+  assert.equal(field("Task owner (gets reminders)").value, "New Owner");
+  assert.equal(field("Task owner Microsoft 365 email").value, "new@example.com");
+  assert.equal(field("Follow up note (optional)").value, "Review with the customer");
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /SharePoint unavailable/);
+  assert.equal(button("Create issue").disabled, false);
+});
+
+test("triage offers reload before attempting to save an intake without a version", async () => {
+  const actions: string[] = [];
+  render(TriageForm, {
+    issue: issue({ triaged: false, status: undefined, eTag: undefined }),
+    onBack: () => { actions.push("queue"); },
+    onReload: async () => { actions.push("reload"); return issue({ triaged: false, status: undefined, eTag: '"2"' }); },
+    onTriage: async () => { actions.push("write"); },
+  });
+  assert.equal(button("Create issue").disabled, true);
+  assert.equal(button("Reject (no action)").disabled, true);
+  await click("Reload latest and return to queue");
+  assert.deepEqual(actions, ["reload", "queue"]);
+});
+
+test("settings show the active web-part connection and preserve failed link edits", async () => {
+  render(SettingsView, {
+    settings: { msFormUrl: "https://forms.office.com/old", flowId: "", spSiteUrl: "https://stale.example", spListName: "Stale list" },
+    connection: { siteUrl: "https://tenant.sharepoint.com/sites/active", issuesListName: "Active issues", progressListName: "Active progress", betaAccessMode: true },
+    onSave: async () => { throw new Error("Settings save failed"); }, onRunDiagnostics: async () => [],
+  });
+  assert.match(container.textContent || "", /https:\/\/tenant.sharepoint.com\/sites\/active/);
+  assert.match(container.textContent || "", /Active issues/);
+  assert.match(container.textContent || "", /Active progress/);
+  assert.doesNotMatch(container.textContent || "", /stale\.example|Stale list/);
+  assert.deepEqual(Array.from(container.querySelectorAll("label")).map(label => label.firstElementChild?.textContent), ["Q-Star Microsoft Form URL", "Form responses → SharePoint flow ID (optional)"]);
+  change("Q-Star Microsoft Form URL", "https://forms.office.com/new");
+  await click("Save settings");
+  assert.equal(field("Q-Star Microsoft Form URL").value, "https://forms.office.com/new");
+  assert.equal(button("Save settings").disabled, false);
+  assert.match(container.textContent || "", /Settings save failed/);
+});
+
+test("today's reported issue appears in both open totals and year-to-date category totals", () => {
+  render(Dashboard, { issues: [issue({ transformedInto: "OFI", reportDate: new Date().toISOString() })] });
+  const heading = Array.from(container.querySelectorAll("h3")).find(candidate => candidate.textContent === "Issue category mix");
+  assert.ok(heading);
+  assert.match(heading.parentElement?.textContent || "", /1 issues/);
+  const open = Array.from(container.querySelectorAll("span")).find(candidate => candidate.textContent === "Open issues");
+  assert.ok(open);
+  assert.match(open.parentElement?.parentElement?.textContent || "", /Open issues11 created total/);
+});
+
+for (const component of [QMIssueDetail, OwnerIssueDetail, TriageForm]) {
+  test(`${component.name} treats accepted updates as saved and requires explicit reload`, async () => {
+    let writes = 0;
+    let reloads = 0;
+    let exits = 0;
+    const update = async () => { writes += 1; throw new IssueRefreshError(1); };
+    render(component, {
+      ...qmProps(), owner: "Owner", onUpdate: update, onTriage: update,
+      onBack: () => { exits += 1; },
+      onReload: async () => { reloads += 1; return issue({ followUp: "Accepted note", implementationDate: todayDate(), eTag: '"2"' }); },
+    });
+    let submit: string;
+    if (component === QMIssueDetail) {
+      change("Follow up (Quality Team notes)", "Accepted note");
+      submit = "Save changes";
+    } else if (component === OwnerIssueDetail) {
+      change("Implementation date", todayDate());
+      submit = "Save progress";
+    } else {
+      change("Task owner (gets reminders)", "Owner");
+      change("Task owner Microsoft 365 email", "owner@example.com");
+      submit = "Create issue";
+    }
+    await click(submit);
+    assert.equal(container.querySelector('[role="alert"]'), null);
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /changes were saved.*do not submit/i);
+    assert.equal(button(submit).disabled, true);
+    act(() => { button(submit).click(); });
+    assert.equal(writes, 1);
+    await click(component === TriageForm ? "Reload latest and return to queue" : "Reload latest and discard draft");
+    assert.equal(reloads, 1);
+    if (component === TriageForm) assert.equal(exits, 1);
+    else assert.equal(container.querySelector('[role="status"]'), null);
+  });
+}
+
+async function renderApp(overrides: object = {}, initial: IIssue[] = [issue()], props: object = {}): Promise<void> {
+  const dataService = {
+    loadIssues: async () => initial,
+    loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }),
+    getIssue: async () => issue({ eTag: '"2"' }),
+    updateIssue: async () => { throw new Error("Unexpected write"); },
+    createIssue: async () => { throw new Error("Unexpected create"); },
+    addProgressLogEntry: async () => { throw new Error("Unexpected append"); },
+    saveSettings: async () => undefined,
+    ...overrides,
+  };
+  await act(async () => {
+    ReactDOM.render(React.createElement(App, { dataService, profile: "admin", userDisplayName: "Quality Manager", userEmail: "qm@example.com", developmentMode: false, onRunDiagnostics: async () => [], ...props }), container);
+  });
+}
+
+async function openIssue(qsNumber?: number): Promise<void> {
+  const row = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent?.includes("Cold-chain breach") && (!qsNumber || candidate.textContent.includes(`QS-${qsNumber}`)));
+  assert.ok(row);
+  await act(async () => { Simulate.click(row); });
+}
+
+function assertSavedWarning(): void {
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Saved with a warning:/);
+  assert.doesNotMatch(container.textContent || "", /failed and was not saved|Could not submit/);
+  assert.equal(container.querySelector('[role="alert"]'), null);
+}
+
+test("accepted creation with failed readback shows its reference and reloads without another create", async () => {
+  let creates = 0;
+  let reads = 0;
+  const saved = issue({ triaged: false, eTag: undefined, saveWarning: "The report was saved. Refresh to load its latest details; do not submit it again." });
+  await renderApp({
+    createIssue: async () => { creates += 1; return saved; },
+    getIssue: async (id: number) => { assert.equal(id, saved.id); reads += 1; return { ...saved, eTag: '"2"', saveWarning: undefined }; },
+  }, []);
+  await click("Report");
+  fillReport();
+  await click("Submit report");
+  assertSavedWarning();
+  assert.match(container.textContent || "", /Report submitted.*QS-1001/);
+  assert.equal(container.querySelector("textarea"), null);
+  await click("Reload saved issue");
+  assert.equal(reads, 1);
+  assert.equal(creates, 1);
+  assert.equal(container.querySelector('[role="status"]'), null);
+});
+
+test("accepted append clears submitted text and failed reload remains a saved warning", async () => {
+  let appends = 0;
+  let reads = 0;
+  const entry = { id: 10, text: "Mitigation completed", author: "Owner", ts: "2026-09-28T12:00:00Z" };
+  await renderApp({
+    addProgressLogEntry: async () => { appends += 1; return { ...entry, saveWarning: "Your update was posted. Refresh to reload its server-recorded author and time; do not post it again." }; },
+    getIssue: async () => { reads += 1; if (reads === 1) throw new Error("Read unavailable"); return issue({ progressLog: [entry] }); },
+  });
+  await click("Issue register");
+  await openIssue();
+  const input = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
+  assert.ok(input);
+  act(() => { Simulate.change(input, { target: { value: entry.text } } as never); });
+  await click("Add update");
+  assertSavedWarning();
+  assert.equal(input.value, "");
+  assert.equal(button("Add update").disabled, true);
+  await click("Reload saved issue");
+  assertSavedWarning();
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /reloading is still unavailable/);
+  await click("Reload saved issue");
+  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.equal(appends, 1);
+  assert.equal(reads, 2);
+  assert.equal(Array.from(container.querySelectorAll("p")).filter(element => element.textContent === entry.text).length, 1);
+});
+
+test("accepted update remains blocked after reopening until reload supplies a new version", async () => {
+  let writes = 0;
+  const versions: string[] = [];
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes += 1;
+      versions.push(eTag);
+      if (writes === 1) throw new IssueRefreshError(1);
+      return issue({ ...patch, eTag: '"3"' });
+    },
+    getIssue: async () => issue({ followUp: "Accepted note", eTag: '"2"' }),
+  });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Accepted note");
+  await click("Save changes");
+  assertSavedWarning();
+  assert.equal(button("Save changes").disabled, true);
+  await click("Back to register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Later note");
+  assert.equal(button("Save changes").disabled, true);
+  assert.equal(writes, 1);
+  await click("Reload latest and keep draft");
+  assert.equal(field("Follow up (Quality Team notes)").value, "Later note");
+  assert.equal(container.querySelector('[role="status"]'), null);
+  await click("Save changes");
+  assert.deepEqual(versions, ['"1"', '"2"']);
+});
+
+test("a rejected write retains the failure banner and editable draft", async () => {
+  await renderApp({ updateIssue: async () => { throw new Error("Write rejected"); } });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Unsubmitted note");
+  await click("Save changes");
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /failed and was not saved: Write rejected/);
+  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted note");
+  assert.equal(button("Save changes").disabled, false);
+});
+
+test("accepted reopening offers reload from the closed detail without resubmitting", async () => {
+  let writes = 0;
+  await renderApp({ updateIssue: async () => { writes += 1; throw new IssueRefreshError(1); } }, [issue({ status: "Closed" })]);
+  await click("Issue register");
+  await openIssue();
+  await click("Re-open issue");
+  assertSavedWarning();
+  assert.equal(button("Re-open issue").disabled, true);
+  act(() => { button("Re-open issue").click(); });
+  assert.equal(writes, 1);
+  await click("Reload saved issue");
+  assert.equal(container.querySelector('[role="status"]'), null);
+  assert.equal(field("Status").value, "In Progress");
+});
+
+function progressInput(): HTMLTextAreaElement {
+  const input = container.querySelector<HTMLTextAreaElement>("textarea[placeholder^='What did you do']");
+  assert.ok(input);
+  return input;
+}
+
+function writeProgress(text: string): void {
+  const input = progressInput();
+  assert.equal(input.disabled, false);
+  act(() => { Simulate.change(input, { target: { value: text } } as never); });
+}
+
+function journalText(): string[] {
+  return Array.from(container.querySelectorAll("ol li p")).map(element => element.textContent || "");
+}
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    test(`${transformedInto} ${action} locks progress until the closed view replaces the form`, async () => {
+      const original = issue({
+        transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+        implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+      });
+      const pending = deferred<void>();
+      let writes = 0;
+      await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+        writes += 1;
+        assert.equal(patch.status, "Closed");
+        await pending.promise;
+        return { ...original, ...patch, eTag: '"2"' };
+      } }, [original]);
+      await click("Issue register");
+      await openIssue();
+      assert.equal(progressInput().disabled, false);
+      if (action === "Save changes") change("Status", "Closed");
+      await click(action);
+      assert.equal(progressInput().disabled, true);
+      assert.equal(button("Add update").disabled, true);
+      await act(async () => { pending.resolve(); });
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(button("Re-open issue").disabled, false);
+      assert.equal(writes, 1);
+    });
+  }
+}
+
+test("a rejected closing transition unlocks and preserves the existing progress draft", async () => {
+  const pending = deferred<IIssue>();
+  await renderApp({ updateIssue: () => pending.promise }, [issue({ transformedInto: "OFI" })]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Keep this progress draft");
+  await click("Verify & close");
+  assert.equal(progressInput().disabled, true);
+  assert.equal(button("Add update").disabled, true);
+  await act(async () => { pending.reject(new Error("Closure rejected")); });
+  assert.equal(progressInput().disabled, false);
+  assert.equal(progressInput().value, "Keep this progress draft");
+  assert.equal(button("Add update").disabled, false);
+});
+
+for (const first of ["update", "append"] as const) {
+  for (const withIds of [true, false]) {
+    test(`${first} requested first preserves both identical journal entries ${withIds ? "with" : "without"} server IDs`, async () => {
+      const initialEntry: IProgressLogEntry = { id: withIds ? 10 : undefined, text: "The same legitimate observation", author: "Quality Manager", ts: "2026-09-28T12:00:00Z" };
+      let stored = issue({ progressLog: [initialEntry] });
+      const gates = { update: deferred<void>(), append: deferred<void>() };
+      const calls: string[] = [];
+      const versions: string[] = [];
+      await renderApp({
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          calls.push("update");
+          versions.push(eTag);
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          const snapshot = { ...stored, progressLog: [...stored.progressLog] };
+          await gates.update.promise;
+          return snapshot;
+        },
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+          calls.push("append");
+          assert.equal(entry.text, initialEntry.text);
+          const saved = { ...initialEntry, id: withIds ? 11 : undefined };
+          stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+          await gates.append.promise;
+          return saved;
+        },
+      }, [stored]);
+      await click("Issue register");
+      await openIssue();
+      change("Follow up (Quality Team notes)", "Saved independently of the journal");
+      writeProgress(initialEntry.text);
+      const second = first === "update" ? "append" : "update";
+      const update = button("Save changes");
+      const append = button("Add update");
+      await act(async () => {
+        Simulate.click(first === "update" ? update : append);
+        Simulate.click(second === "update" ? update : append);
+      });
+      assertFieldsDisabled(true);
+      assert.equal(progressInput().disabled, true);
+      await act(async () => { gates[second].resolve(); });
+      await act(async () => { gates[first].resolve(); });
+      assert.deepEqual(journalText(), [initialEntry.text, initialEntry.text]);
+      assert.deepEqual(calls, [first, second]);
+      assert.deepEqual(versions, ['"1"']);
+      assert.equal(progressInput().value, "");
+      assert.equal(field("Follow up (Quality Team notes)").value, "Saved independently of the journal");
+      assert.equal(button("Save changes").disabled, true);
+    });
+  }
+}
+
+test("a queued append proceeds after an issue save fails without discarding either draft", async () => {
+  const pending = deferred<IIssue>();
+  const calls: string[] = [];
+  await renderApp({
+    updateIssue: () => { calls.push("update"); return pending.promise; },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { calls.push("append"); return { ...entry, id: 18 }; },
+  });
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Retain this rejected draft");
+  writeProgress("An independent accepted observation");
+  await act(async () => { Simulate.click(button("Save changes")); Simulate.click(button("Add update")); });
+  assert.deepEqual(calls, ["update"]);
+  await act(async () => { pending.reject(new Error("Issue write rejected")); });
+  assert.deepEqual(calls, ["update", "append"]);
+  assert.deepEqual(journalText(), ["An independent accepted observation"]);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Retain this rejected draft");
+  assert.equal(button("Save changes").disabled, false);
+  assert.equal(progressInput().value, "");
+  assert.match(container.textContent || "", /Issue write rejected/);
+});
+
+test("closing requires a fresh request after an accepted append settles", async () => {
+  const pending = deferred<void>();
+  let stored = issue({ transformedInto: "OFI" });
+  const calls: string[] = [];
+  await renderApp({
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      calls.push("append");
+      const saved = { ...entry, id: 20 };
+      stored = { ...stored, progressLog: [saved] };
+      await pending.promise;
+      return saved;
+    },
+    updateIssue: async (_id: number, patch: Partial<IIssue>) => { calls.push("close"); stored = { ...stored, ...patch, eTag: '"2"' }; return stored; },
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Final closure evidence");
+  await click("Add update");
+  assert.equal(button("Verify & close").disabled, true);
+  await act(async () => { button("Verify & close").click(); });
+  assert.deepEqual(calls, ["append"]);
+  assert.equal(progressInput().disabled, true);
+  await act(async () => { pending.resolve(); });
+  assert.deepEqual(calls, ["append"]);
+  assert.deepEqual(journalText(), ["Final closure evidence"]);
+  assert.equal(progressInput().disabled, false);
+  await click("Verify & close");
+  assert.deepEqual(calls, ["append", "close"]);
+  assert.deepEqual(journalText(), ["Final closure evidence"]);
+  assert.equal(container.querySelector("textarea"), null);
+});
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    test(`${transformedInto} ${action} requires a fresh close after retrying a failed append`, async () => {
+      let stored = issue({
+        transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+        implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+      });
+      const attempts = [deferred<void>(), deferred<void>()];
+      let appends = 0;
+      let closures = 0;
+      await renderApp({
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+          const attempt = attempts[appends++];
+          await attempt.promise;
+          const saved = { ...entry, id: 21 };
+          stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+          return saved;
+        },
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          closures += 1;
+          assert.equal(patch.status, "Closed");
+          assert.equal(eTag, '"1"');
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          return stored;
+        },
+      }, [stored]);
+      await click("Issue register");
+      await openIssue();
+      writeProgress("Closure evidence that must not be lost");
+      if (action === "Save changes") change("Status", "Closed");
+      await click("Add update");
+      assert.equal(button(action).disabled, true);
+      await act(async () => { button(action).click(); });
+      assert.equal(closures, 0);
+      assert.equal(progressInput().disabled, true);
+      await act(async () => { attempts[0].reject(new Error("Journal append rejected")); });
+      assert.equal(closures, 0);
+      assert.notEqual(stored.status, "Closed");
+      assert.equal(progressInput().value, "Closure evidence that must not be lost");
+      assert.equal(progressInput().disabled, false);
+      assert.equal(button("Add update").disabled, false);
+      assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Journal append rejected/);
+      assert.deepEqual(journalText(), []);
+      await click("Add update");
+      assert.equal(button(action).disabled, true);
+      await act(async () => { button(action).click(); });
+      assert.equal(appends, 2);
+      assert.equal(closures, 0);
+      await act(async () => { attempts[1].resolve(); });
+      assert.equal(closures, 0);
+      assert.deepEqual(journalText(), ["Closure evidence that must not be lost"]);
+      await click(action);
+      assert.equal(closures, 1);
+      assert.equal(stored.status, "Closed");
+      assert.deepEqual(journalText(), ["Closure evidence that must not be lost"]);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(container.querySelector('[role="alert"]'), null);
+    });
+  }
+}
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    for (const reloadCount of [1, 3]) {
+      test(`${transformedInto} ${action} rejects closing before enqueueing across ${reloadCount} reloads`, async () => {
+        let stored = issue({
+          transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+          implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+        });
+        const failedAppend = deferred<void>();
+        const retriedAppend = deferred<void>();
+        const reloads = Array.from({ length: reloadCount }, () => deferred<void>());
+        let appends = 0;
+        let reads = 0;
+        let closures = 0;
+        await renderApp({
+          addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+            const attempt = ++appends;
+            if (attempt === 2) await failedAppend.promise;
+            if (attempt === 3) await retriedAppend.promise;
+            const saved = { ...entry, id: attempt, saveWarning: attempt === 1 ? "Your update was posted. Reload its server details." : undefined };
+            stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+            return saved;
+          },
+          getIssue: async () => {
+            const snapshot = { ...stored, progressLog: [...stored.progressLog] };
+            await reloads[reads++].promise;
+            return snapshot;
+          },
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            closures += 1;
+            assert.equal(patch.status, "Closed");
+            assert.equal(eTag, '"1"');
+            stored = { ...stored, ...patch, eTag: '"2"' };
+            return stored;
+          },
+        }, [stored]);
+        await click("Issue register");
+        await openIssue();
+        writeProgress("Accepted observation");
+        await click("Add update");
+        assertSavedWarning();
+        writeProgress("Rejected note preserved through reloads");
+        if (action === "Save changes") change("Status", "Closed");
+        const add = button("Add update");
+        const reload = button("Reload saved issue");
+        const close = button(action);
+        assert.equal(close.disabled, false);
+        await act(async () => {
+          Simulate.click(add);
+          for (let i = 0; i < reloadCount; i++) Simulate.click(reload);
+          Simulate.click(close);
+        });
+        assert.equal(closures, 0);
+        assert.equal(reads, 0);
+        assert.equal(button(action).disabled, true);
+        assert.match(container.querySelector('[role="alert"]')?.textContent || "", /pending work.*Try closing again/);
+        await act(async () => { failedAppend.reject(new Error("Journal append rejected")); });
+        assert.equal(closures, 0);
+        assert.equal(progressInput().disabled, true);
+        assert.equal(progressInput().value, "Rejected note preserved through reloads");
+        assert.match(container.querySelector('p[role="alert"]')?.textContent || "", /Journal append rejected/);
+        for (let i = 0; i < reloadCount; i++) {
+          assert.equal(reads, i + 1);
+          assert.equal(button(action).disabled, true);
+          await act(async () => { button(action).click(); reloads[i].resolve(); });
+          assert.equal(closures, 0);
+          assert.notEqual(stored.status, "Closed");
+          assert.equal(progressInput().value, "Rejected note preserved through reloads");
+          assert.match(container.querySelector('p[role="alert"]')?.textContent || "", /Journal append rejected/);
+        }
+        assert.equal(progressInput().disabled, false);
+        assert.equal(button(action).disabled, false);
+        assert.deepEqual(journalText(), ["Accepted observation"]);
+        await click("Add update");
+        assert.equal(button(action).disabled, true);
+        await act(async () => { retriedAppend.resolve(); });
+        assert.equal(closures, 0);
+        assert.equal(progressInput().value, "");
+        await click(action);
+        assert.equal(closures, 1);
+        assert.equal(stored.status, "Closed");
+        assert.deepEqual(journalText().sort(), ["Accepted observation", "Rejected note preserved through reloads"]);
+        assert.equal(container.querySelector("textarea"), null);
+        assert.equal(container.querySelector('[role="alert"]'), null);
+      });
+    }
+  }
+}
+
+test("reload and append use the same issue queue so a stale read cannot erase an accepted entry", async () => {
+  const pendingRead = deferred<void>();
+  let stored = issue();
+  const calls: string[] = [];
+  await renderApp({
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      calls.push("append");
+      const id = stored.progressLog.length + 1;
+      const saved = { ...entry, id, saveWarning: id === 1 ? "Your update was posted. Reload its server details." : undefined };
+      stored = { ...stored, progressLog: [...stored.progressLog, saved] };
+      return saved;
+    },
+    getIssue: async () => {
+      calls.push("reload");
+      const snapshot = { ...stored, progressLog: [...stored.progressLog] };
+      await pendingRead.promise;
+      return snapshot;
+    },
+  });
+  await click("Issue register");
+  await openIssue();
+  writeProgress("First accepted observation");
+  await click("Add update");
+  writeProgress("Second accepted observation");
+  await act(async () => { Simulate.click(button("Reload saved issue")); Simulate.click(button("Add update")); });
+  assertFieldsDisabled(true);
+  assert.equal(progressInput().disabled, true);
+  await act(async () => { pendingRead.resolve(); });
+  assert.deepEqual(calls, ["append", "reload", "append"]);
+  assert.deepEqual(journalText().sort(), ["First accepted observation", "Second accepted observation"]);
+  assert.equal(progressInput().value, "");
+});
+
+test("operations for another issue remain independent of a pending save", async () => {
+  const pending = deferred<void>();
+  const first = issue();
+  const second = issue({ id: 2, qsNumber: 1002 });
+  const writes: number[] = [];
+  await renderApp({ updateIssue: async (id: number, patch: Partial<IIssue>) => {
+    writes.push(id);
+    if (id === first.id) await pending.promise;
+    return { ...(id === first.id ? first : second), ...patch, eTag: '"2"' };
+  } }, [first, second]);
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "First issue note");
+  await click("Save changes");
+  await click("Back to register");
+  const secondRow = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent?.includes("QS-1002"));
+  assert.ok(secondRow);
+  await act(async () => { Simulate.click(secondRow); });
+  assertFieldsDisabled(false);
+  assert.equal(progressInput().disabled, false);
+  change("Follow up (Quality Team notes)", "Second issue note");
+  await click("Save changes");
+  assert.deepEqual(writes, [1, 2]);
+  assert.equal(button("Save changes").disabled, true);
+  await act(async () => { pending.resolve(); });
+  assert.equal(field("Follow up (Quality Team notes)").value, "Second issue note");
+});
+
+test("closing another issue is allowed while an unrelated issue has pending work", async () => {
+  const pending = deferred<void>();
+  const first = issue();
+  const second = issue({ id: 2, qsNumber: 1002, transformedInto: "OFI" });
+  const writes: number[] = [];
+  await renderApp({ updateIssue: async (id: number, patch: Partial<IIssue>) => {
+    writes.push(id);
+    if (id === first.id) await pending.promise;
+    return { ...(id === first.id ? first : second), ...patch, eTag: '"2"' };
+  } }, [first, second]);
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "First issue note");
+  await click("Save changes");
+  await click("Back to register");
+  const secondRow = Array.from(container.querySelectorAll("button")).find(candidate => candidate.textContent?.includes("QS-1002"));
+  assert.ok(secondRow);
+  await act(async () => { Simulate.click(secondRow); });
+  await click("Verify & close");
+  assert.deepEqual(writes, [1, 2]);
+  assert.equal(button("Re-open issue").disabled, false);
+  await act(async () => { pending.resolve(); });
+  assert.equal(button("Re-open issue").disabled, false);
+});
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    for (const fails of [false, true]) {
+      test(`${transformedInto} ${action} stays locked across remount until ${fails ? "rejection and explicit retry" : "accepted closure"}`, async () => {
+        let stored = issue({
+          transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+          implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+        });
+        const pending = deferred<void>();
+        let writes = 0;
+        let appends = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes += 1;
+            assert.equal(patch.status, "Closed");
+            assert.equal(eTag, '"1"');
+            if (writes === 1) await pending.promise;
+            stored = { ...stored, ...patch, eTag: '"2"' };
+            return stored;
+          },
+          addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return entry; },
+        }, [stored]);
+        await click("Issue register");
+        await openIssue();
+        if (action === "Save changes") change("Status", "Closed");
+        await click(action);
+        await click("Back to register");
+        await openIssue();
+        assertFieldsDisabled(true);
+        assert.equal(progressInput().disabled, true);
+        for (const label of ["Save changes", "Verify & close", "Put on hold", "Reject issue", "Add update"]) {
+          assert.equal(button(label).disabled, true);
+          act(() => { button(label).click(); });
+        }
+        assert.equal(writes, 1);
+        assert.equal(appends, 0);
+        assert.equal(progressInput().value, "");
+        if (fails) {
+          await act(async () => { pending.reject(new Error("Closure rejected after remount")); });
+          assertFieldsDisabled(false);
+          assert.equal(progressInput().disabled, false);
+          assert.notEqual(stored.status, "Closed");
+          assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Closure rejected after remount/);
+          if (action === "Save changes") change("Status", "Closed");
+          await click(action);
+        } else {
+          await act(async () => { pending.resolve(); });
+        }
+        assert.equal(writes, fails ? 2 : 1);
+        assert.equal(appends, 0);
+        assert.equal(container.querySelector("textarea"), null);
+        assert.equal(container.querySelector('[role="alert"]'), null);
+        assert.equal(button("Re-open issue").disabled, false);
+        assert.equal(stored.status, "Closed");
+      });
+    }
+  }
+}
+
+for (const profile of ["qm", "owner"] as const) {
+  const identity = { profile, userDisplayName: "Owner", userEmail: "owner@example.com" };
+  const back = profile === "owner" ? "Back to my tasks" : "Back to register";
+  const label = profile === "owner" ? "Status" : "Follow up (Quality Team notes)";
+  const submit = profile === "owner" ? "Save" : "Save changes";
+
+  test(`${profile} remounted during a non-closing save resumes with the accepted fields and ETag`, async () => {
+    let stored = issue({ transformedInto: "OFI", status: "Created", followUp: "Original note" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) await pending.promise;
+      stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+      return stored;
+    } }, [stored], identity);
+    await click("Issue register");
+    await openIssue();
+    change(label, profile === "owner" ? "In Progress" : "Accepted note");
+    await click(submit);
+    await click(back);
+    await openIssue();
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Accepted note");
+    await act(async () => { pending.resolve(); });
+    assertFieldsDisabled(false);
+    assert.equal(progressInput().disabled, false);
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Accepted note");
+    assert.equal(button(submit).disabled, true);
+    change(label, profile === "owner" ? "Created" : "Next note");
+    await click(submit);
+    assert.deepEqual(writes.map(write => write.eTag), ['"1"', '"2"']);
+    if (profile === "qm") assert.deepEqual(writes[1].patch, { followUp: "Next note" });
+    else assert.equal(writes[1].patch.status, "Created");
+    assert.equal(container.querySelector('[role="alert"]'), null);
+  });
+
+  test(`${profile} remounted during an append keeps all issue controls locked`, async () => {
+    const pending = deferred<IProgressLogEntry>();
+    const entry = { id: 31, text: "Accepted before navigation", author: "Owner", ts: new Date().toISOString() };
+    let appends = 0;
+    await renderApp({ addProgressLogEntry: () => { appends += 1; return pending.promise; } }, [issue()], identity);
+    await click("Issue register");
+    await openIssue();
+    writeProgress(entry.text);
+    await click("Add update");
+    await click(back);
+    await openIssue();
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    await act(async () => { pending.resolve(entry); });
+    assertFieldsDisabled(false);
+    assert.equal(progressInput().disabled, false);
+    assert.deepEqual(journalText(), [entry.text]);
+    assert.equal(appends, 1);
+  });
+
+  test(`${profile} retains genuine edits and their original ETag when reload brings a newer snapshot`, async () => {
+    const original = issue({ transformedInto: "OFI", status: "Created", followUp: "Original note" });
+    const entry = { id: 32, text: "Accepted observation", author: "Owner", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+    const latest = { ...original, followUp: "Another manager's note", progressLog: [entry], eTag: '"2"' };
+    const pending = deferred<IIssue>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    let reads = 0;
+    await renderApp({
+      addProgressLogEntry: async () => entry,
+      getIssue: async () => { reads += 1; return reads === 1 ? pending.promise : latest; },
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => { writes.push({ patch, eTag }); throw new IssueConflictError(1, latest); },
+    }, [original], identity);
+    await click("Issue register");
+    await openIssue();
+    writeProgress(entry.text);
+    await click("Add update");
+    change(label, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    writeProgress("Unsubmitted journal draft");
+    await click("Reload saved issue");
+    assertFieldsDisabled(true);
+    assert.equal(progressInput().disabled, true);
+    await act(async () => { pending.resolve(latest); });
+    assertFieldsDisabled(false);
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    assert.equal(progressInput().value, "Unsubmitted journal draft");
+    assert.equal(progressInput().disabled, false);
+    await click(submit);
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].eTag, '"1"');
+    if (profile === "qm") assert.deepEqual(writes[0].patch, { followUp: "Genuine unsaved note" });
+    else assert.equal(writes[0].patch.status, "In Progress");
+    assert.equal(field(label).value, profile === "owner" ? "In Progress" : "Genuine unsaved note");
+    assert.match(container.textContent || "", /Your draft has been kept/);
+    await click("Reload latest and discard draft");
+    assert.equal(field(label).value, profile === "owner" ? "Created" : "Another manager's note");
+    assert.equal(progressInput().value, "Unsubmitted journal draft");
+  });
+}
+
+for (const submitBeforeNavigation of [false, true]) {
+  test(`triage ${submitBeforeNavigation ? "rejected pending submission" : "unsent draft"} survives navigation and another field edit with its original ETag`, async () => {
+    const original = issue({ triaged: false, status: undefined, taskCreated: "No", transformedInto: undefined });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (submitBeforeNavigation && writes.length === 1) await pending.promise;
+      return { ...original, ...patch, eTag: '"2"' };
+    } }, [original]);
+    await click("Triage queue1"); await openIssue();
+    change("Transform into", "NC Major");
+    change("Task owner (gets reminders)", "Retained Owner");
+    change("Task owner Microsoft 365 email", "retained@example.com");
+    change("Escalation BU", "IT");
+    change("Follow up note (optional)", "Retained assessment");
+    const dueDate = field("Due date").value;
+    if (submitBeforeNavigation) await click("Create issue");
+    await click("Back to triage queue"); await openIssue();
+    assert.equal(field("Transform into").value, "NC Major");
+    assert.equal(field("Task owner (gets reminders)").value, "Retained Owner");
+    assert.equal(field("Task owner Microsoft 365 email").value, "retained@example.com");
+    assert.equal(field("Escalation BU").value, "IT");
+    assert.equal(field("Follow up note (optional)").value, "Retained assessment");
+    assert.equal(field("Due date").value, dueDate);
+    if (submitBeforeNavigation) {
+      assertFieldsDisabled(true);
+      await act(async () => { pending.reject(new Error("Triage rejected after navigation")); });
+      assert.match(container.textContent || "", /Triage rejected after navigation/);
+    }
+    change("Due date", "2026-12-01");
+    await click("Create issue");
+    assert.equal(writes.length, submitBeforeNavigation ? 2 : 1);
+    assert.deepEqual(writes[writes.length - 1], { patch: {
+      triaged: true, status: "Created", transformedInto: "NC Major", taskOwner: "Retained Owner",
+      taskOwnerEmail: "retained@example.com", ownerBU: "IT", dueDate: "2026-12-01", followUp: "Retained assessment", taskCreated: "Yes",
+    }, eTag: original.eTag });
+    await click("Issue register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Retained assessment");
+    assert.deepEqual(recoveredCopies(), []);
+  });
+}
+
+for (const action of ["Create issue", "Reject (no action)"]) {
+  for (const readbackFails of [false, true]) {
+    for (const newerEdit of [false, true]) {
+      test(`triage pending ${action} ${readbackFails ? "readback failure" : "success"} consumes dispatched fields across remount ${newerEdit ? "and preserves newer edits" : "without false archives"}`, async () => {
+        let stored = issue({ triaged: false, status: undefined, taskCreated: "No", transformedInto: undefined });
+        const pending = deferred<void>();
+        const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+        let reads = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes.push({ patch, eTag });
+            await pending.promise;
+            stored = { ...stored, ...patch, eTag: '"2"' };
+            if (readbackFails) throw new IssueRefreshError(stored.id);
+            return stored;
+          },
+          getIssue: async () => {
+            reads += 1;
+            if (reads === 1) throw new Error("Triage readback still unavailable");
+            return stored;
+          },
+        }, [stored]);
+        await click("Triage queue1"); await openIssue();
+        change("Transform into", "NC Major");
+        change("Task owner (gets reminders)", "Draft Owner");
+        change("Task owner Microsoft 365 email", "draft-owner@example.com");
+        change("Follow up note (optional)", "Dispatched assessment");
+        await click(action);
+        await click("Back to triage queue"); await openIssue();
+        assert.equal(field("Follow up note (optional)").value, "Dispatched assessment");
+        assertFieldsDisabled(true);
+        if (newerEdit) act(() => { Simulate.change(field("Follow up note (optional)"), { target: { value: "Newer assessment" } } as never); });
+        await act(async () => { pending.resolve(); });
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].eTag, '"1"');
+        assert.equal(stored.followUp, "Dispatched assessment");
+        if (readbackFails) {
+          const assertDraft = () => {
+            assert.equal(field("Follow up note (optional)").value, newerEdit ? "Newer assessment" : "Dispatched assessment");
+            assert.equal(field("Task owner (gets reminders)").value, "Draft Owner");
+            assert.equal(field("Task owner Microsoft 365 email").value, "draft-owner@example.com");
+            assert.equal(field("Transform into").value, "NC Major");
+            assert.equal(button("Create issue").disabled, true);
+            assert.equal(button("Reject (no action)").disabled, true);
+          };
+          assertDraft();
+          await click("Back to triage queue"); await openIssue(); assertDraft();
+          await click("Reload latest and return to queue"); assertDraft();
+          assert.equal(reads, 1);
+          assert.equal(writes.length, 1);
+          await click("Reload latest and return to queue");
+          assert.equal(reads, 2);
+        }
+        await click("Issue register"); await openIssue();
+        const expected: Record<string, string> = action === "Reject (no action)" ? {
+          "Transformed into": "NC Major", "Task owner": "Draft Owner", "Task owner Microsoft 365 email": "draft-owner@example.com",
+        } : {};
+        if (newerEdit) expected["Quality Team notes"] = "Newer assessment";
+        assert.deepEqual(recoveredCopies(), Object.keys(expected).length ? [expected] : []);
+        assert.equal(field("Follow up (Quality Team notes)").value, "Dispatched assessment");
+        change("Follow up (Quality Team notes)", "Fresh unrelated QM draft");
+        assert.deepEqual(recoveredCopies(), Object.keys(expected).length ? [expected] : []);
+        assert.equal(writes.length, 1);
+      });
+    }
+  }
+}
+
+test("triage explicit conflict reload refreshes clean defaults while preserving dirty fields", async () => {
+  const original = issue({ triaged: false, status: undefined });
+  const fresh = { ...original, reportDate: "2026-09-01", severity: "Medium" as const, eTag: '"2"' };
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) throw new IssueConflictError(original.id, fresh);
+      return { ...fresh, ...patch, eTag: '"3"' };
+    },
+    getIssue: async () => fresh,
+  }, [original]);
+  await click("Triage queue1"); await openIssue();
+  change("Task owner (gets reminders)", "Retained Owner");
+  change("Task owner Microsoft 365 email", "retained@example.com");
+  change("Follow up note (optional)", "Retained note");
+  await click("Create issue");
+  await click("Reload latest and return to queue"); await openIssue();
+  assert.equal(field("Task owner (gets reminders)").value, "Retained Owner");
+  assert.equal(field("Follow up note (optional)").value, "Retained note");
+  assert.equal(field("Due date").value, "2026-10-01");
+  change("Escalation BU", "IT"); await click("Create issue");
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].eTag, original.eTag);
+  assert.equal(writes[1].eTag, fresh.eTag);
+  assert.equal(writes[1].patch.dueDate, "2026-10-01");
+  assert.equal(writes[1].patch.followUp, "Retained note");
+  assert.equal(writes[1].patch.taskOwnerEmail, "retained@example.com");
+});
+
+test("triage rejection preserves a newer note equal to the action's overridden output", async () => {
+  const pending = deferred<void>();
+  const original = issue({ triaged: false, status: undefined });
+  const overridden = "Declined at triage — no quality action required.";
+  let writes = 0;
+  await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+    writes += 1;
+    assert.equal(patch.followUp, overridden);
+    await pending.promise;
+    return { ...original, ...patch, eTag: '"2"' };
+  } }, [original]);
+  await click("Triage queue1"); await openIssue();
+  change("Task owner (gets reminders)", "Unsubmitted Owner");
+  await click("Reject (no action)"); await click("Back to triage queue"); await openIssue();
+  act(() => { Simulate.change(field("Follow up note (optional)"), { target: { value: overridden } } as never); });
+  await act(async () => { pending.resolve(); });
+  await click("Issue register"); await openIssue();
+  assert.deepEqual(recoveredCopies(), [{ "Task owner": "Unsubmitted Owner", "Quality Team notes": overridden }]);
+  assert.equal(writes, 1);
+});
+
+test("another issue's receipt recovery preserves the original triage baseline and ETag", async () => {
+  const original = issue({ id: 2, qsNumber: 1002, triaged: false, status: undefined });
+  let stored = [issue(), original];
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  await renderApp({
+    loadIssues: async () => stored,
+    addProgressLogEntry: async () => { throw new AcceptedWriteError("progress", { issueId: 1 }); },
+    updateIssue: async (id: number, patch: Partial<IIssue>, eTag: string) => {
+      assert.equal(id, original.id);
+      writes.push({ patch, eTag });
+      throw new IssueConflictError(id, stored[1]);
+    },
+  }, stored, { userEmail: "triage-baseline@example.com" });
+  await click("Triage queue1"); await openIssue(1002);
+  change("Task owner (gets reminders)", "Retained Owner");
+  change("Task owner Microsoft 365 email", "retained@example.com");
+  change("Follow up note (optional)", "Retained assessment");
+  await click("Back to triage queue"); await click("Issue register"); await openIssue(1001);
+  writeProgress("Accepted A entry"); await click("Add update");
+  await click("Back to register"); await click("Triage queue1"); await openIssue(1002);
+  stored = [stored[0], { ...original, reportDate: "2026-09-01", severity: "Medium", eTag: '"2"' }];
+  await click("Reload saved data");
+  assert.equal(field("Due date").value, "2026-06-15");
+  assert.equal(field("Follow up note (optional)").value, "Retained assessment");
+  change("Escalation BU", "IT"); await click("Create issue");
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].eTag, original.eTag);
+  assert.equal(writes[0].patch.dueDate, "2026-06-15");
+  assert.equal(writes[0].patch.taskOwnerEmail, "retained@example.com");
+  assert.match(container.textContent || "", /This issue changed since you opened it/);
+});
+
+test("triage remounted during an accepted write requires recovery before another submission", async () => {
+  const pending = deferred<IIssue>();
+  const original = issue({ triaged: false, status: undefined });
+  let writes = 0;
+  await renderApp({
+    updateIssue: () => { writes += 1; return pending.promise; },
+    getIssue: async () => ({ ...original, triaged: true, status: "Created", eTag: '"2"' }),
+  }, [original]);
+  await click("Triage queue1");
+  await openIssue();
+  change("Task owner (gets reminders)", "Owner");
+  change("Task owner Microsoft 365 email", "owner@example.com");
+  await click("Create issue");
+  await click("Back to triage queue");
+  await openIssue();
+  assertFieldsDisabled(true);
+  assert.equal(button("Create issue").disabled, true);
+  assert.equal(button("Reject (no action)").disabled, true);
+  await act(async () => { pending.reject(new IssueRefreshError(original.id)); });
+  assertSavedWarning();
+  assert.equal(button("Create issue").disabled, true);
+  await click("Reload latest and return to queue");
+  await click("Issue register");
+  await openIssue();
+  assertFieldsDisabled(false);
+  assert.equal(field("Status").value, "Created");
+  assert.equal(writes, 1);
+});
+
+for (const operation of ["triage", "reload"] as const) {
+  test(`${operation} completion for issue A cannot navigate away from issue B's drafts`, async () => {
+    const first = issue({ triaged: false, status: undefined, eTag: operation === "reload" ? undefined : '"1"' });
+    const second = issue({ id: 2, qsNumber: 1002 });
+    const pending = deferred<void>();
+    const calls: string[] = [];
+    await renderApp({
+      updateIssue: async (id: number, patch: Partial<IIssue>) => {
+        assert.equal(id, first.id);
+        calls.push("triage");
+        await pending.promise;
+        return { ...first, ...patch, eTag: '"2"' };
+      },
+      getIssue: async (id: number) => {
+        assert.equal(id, first.id);
+        calls.push("reload");
+        await pending.promise;
+        return { ...first, eTag: '"2"' };
+      },
+    }, [first, second]);
+    await click("Triage queue1");
+    await openIssue(1001);
+    if (operation === "triage") {
+      change("Task owner (gets reminders)", "Owner");
+      change("Task owner Microsoft 365 email", "owner@example.com");
+      await click("Create issue");
+    } else await click("Reload latest and return to queue");
+    await click("Back to triage queue");
+    await click("Issue register");
+    await openIssue(1002);
+    assertFieldsDisabled(false);
+    change("Follow up (Quality Team notes)", "Issue B's unsaved assessment");
+    writeProgress("Issue B's unposted evidence");
+    await act(async () => { pending.resolve(); });
+    assert.equal(field("Follow up (Quality Team notes)").value, "Issue B's unsaved assessment");
+    assert.equal(progressInput().value, "Issue B's unposted evidence");
+    assert.equal(button("Save changes").disabled, false);
+    assert.equal(button("Add update").disabled, false);
+    assert.deepEqual(calls, [operation]);
+  });
+}
+
+function recoveryPanel(): HTMLElement | null {
+  return container.querySelector('section[aria-label="Unsaved draft recovery"]');
+}
+
+function recoveredFields(panel = recoveryPanel()): Record<string, string> {
+  assert.ok(panel, "Unsaved draft recovery should be available");
+  return Object.fromEntries(Array.from(panel.querySelectorAll("dt")).map(label => [label.textContent, label.nextElementSibling?.textContent]));
+}
+
+function recoveredCopies(): Record<string, string>[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('section[aria-label="Unsaved draft recovery"]')).map(panel => recoveredFields(panel));
+}
+
+async function discardRecoveredCopy(index: number): Promise<void> {
+  const panel = container.querySelectorAll('section[aria-label="Unsaved draft recovery"]')[index];
+  assert.ok(panel);
+  const discard = panel.querySelector("button");
+  assert.ok(discard);
+  assert.equal(discard.textContent, "Discard recovered draft");
+  await act(async () => { Simulate.click(discard); });
+}
+
+for (const [profile, transition] of [["qm", "Closed"], ["owner", "Closed"], ["owner", "reassigned"]] as const) {
+  test(`${profile} retains selectable detail and progress recovery after an external ${transition} refresh`, async () => {
+    const original = issue({ status: "Created", followUp: "Original note", eTag: '"private-version-1"' });
+    const second = issue({ id: 2, qsNumber: 1002 });
+    const accepted = { id: 40, text: "Already accepted evidence", author: "Owner", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+    const latest = {
+      ...original, eTag: '"private-version-2"', progressLog: [accepted],
+      ...(transition === "Closed" ? { status: "Closed" as const } : { taskOwnerEmail: "replacement@example.com" }),
+    };
+    const pending = deferred<IIssue>();
+    let writes = 0;
+    let appends = 0;
+    await renderApp({
+      addProgressLogEntry: async () => { appends += 1; return accepted; },
+      getIssue: () => pending.promise,
+      updateIssue: async () => { writes += 1; throw new Error("No write should occur"); },
+    }, [original, second], { profile, userDisplayName: "Owner", userEmail: "owner@example.com" });
+    await click("Issue register");
+    await openIssue(1001);
+    writeProgress(accepted.text);
+    await click("Add update");
+    const date = addCalendarDays(todayDate(), -3);
+    if (profile === "qm") {
+      change("Follow up (Quality Team notes)", "");
+      change("Root cause", "Unsaved assessment\nSecond line");
+      change("Task owner Microsoft 365 email", "draft@example.com");
+    } else {
+      change("Status", "In Progress");
+      change("Implementation date", date);
+    }
+    writeProgress("Unposted progress\nKeep this evidence");
+    await click("Reload saved issue");
+    assertFieldsDisabled(true);
+    await act(async () => { pending.resolve(latest); });
+    const expected = {
+      ...(profile === "qm" ? { "Quality Team notes": "(Cleared)", "Root cause": "Unsaved assessment\nSecond line", "Task owner Microsoft 365 email": "draft@example.com" } : { Status: "In Progress", "Implementation date": date }),
+      "Unposted progress note": "Unposted progress\nKeep this evidence",
+    };
+    assert.deepEqual(recoveredFields(), expected);
+    assert.equal(container.querySelectorAll("label input,label select,label textarea,textarea[placeholder^='What did you do']").length, 0);
+    assert.equal(Array.from(container.querySelectorAll("button")).some(element => ["Save changes", "Save progress", "Add update", "Verify & close"].includes(element.textContent || "")), false);
+    if (profile === "owner") assert.equal(Array.from(container.querySelectorAll("button")).some(element => element.textContent === "Re-open issue"), false);
+    assert.doesNotMatch(recoveryPanel()?.textContent || "", /private-version|eTag|Already accepted evidence/);
+    const content = recoveryPanel()?.querySelector("dl");
+    assert.ok(content);
+    assert.equal(window.getComputedStyle(content).userSelect, "text");
+    await click("Back to register");
+    await openIssue(1002);
+    assert.equal(recoveryPanel(), null);
+    assertFieldsDisabled(false);
+    await click(profile === "owner" ? "Back to my tasks" : "Back to register");
+    await openIssue(1001);
+    assert.deepEqual(recoveredFields(), expected);
+    await click("Discard recovered draft");
+    assert.equal(recoveryPanel(), null);
+    await click("Back to register");
+    await openIssue(1001);
+    assert.equal(recoveryPanel(), null);
+    assert.equal(writes, 0);
+    assert.equal(appends, 1);
+  });
+}
+
+for (const transformedInto of ["OFI", "NC Minor"] as const) {
+  for (const action of ["Verify & close", "Save changes"]) {
+    for (const readbackFails of [false, true]) {
+      test(`${transformedInto} ${action} acceptance ${readbackFails ? "with failed readback" : "with readback"} immediately closes the App view and recovers only unsubmitted progress`, async () => {
+        let stored = issue({
+          transformedInto, status: transformedInto === "OFI" ? "In Progress" : "Under Testing/Revision",
+          implementationDate: addCalendarDays(todayDate(), -90), verifiedBy: "Verifier", verifiedByEmail: "verifier@example.com",
+        });
+        const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+        let reads = 0;
+        let appends = 0;
+        await renderApp({
+          updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+            writes.push({ patch, eTag });
+            stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+            if (readbackFails && writes.length === 1) throw new IssueRefreshError(stored.id);
+            return stored;
+          },
+          getIssue: async () => {
+            reads += 1;
+            if (reads === 1) throw new Error("Read still unavailable");
+            return stored;
+          },
+          addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return { ...entry, id: appends }; },
+        }, [stored]);
+        await click("Issue register");
+        await openIssue();
+        change("Follow up (Quality Team notes)", "Submitted assessment");
+        writeProgress("Unsubmitted progress to recover");
+        if (action === "Save changes") change("Status", "Closed");
+        await click(action);
+        assert.equal(stored.status, "Closed");
+        assert.match(container.textContent || "", /Closed · read-only/);
+        assert.equal(container.querySelector("textarea"), null);
+        assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+        assert.doesNotMatch(recoveryPanel()?.textContent || "", /Submitted assessment/);
+        assert.match(container.textContent || "", /Submitted assessment/);
+        assert.ok(Array.from(container.querySelectorAll("dt")).some(element => element.textContent === "Closed on"));
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].eTag, '"1"');
+        assert.equal(appends, 0);
+        if (readbackFails) {
+          assertSavedWarning();
+          assert.equal(button("Re-open issue").disabled, true);
+          act(() => { button("Re-open issue").click(); });
+          await click("Back to register");
+          await openIssue();
+          assert.match(container.textContent || "", /Closed · read-only/);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, true);
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+          await click("Reload saved issue");
+          assertSavedWarning();
+          assert.match(container.querySelector('[role="status"]')?.textContent || "", /Read still unavailable/);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, true);
+          assert.equal(writes.length, 1);
+          assert.equal(appends, 0);
+          await click("Reload saved issue");
+          assert.equal(reads, 2);
+          assert.equal(container.querySelector('[role="status"]'), null);
+          assert.equal(container.querySelector("textarea"), null);
+          assert.equal(button("Re-open issue").disabled, false);
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+          await click("Re-open issue");
+          assert.equal(writes.length, 2);
+          assert.equal(writes[1].eTag, '"2"');
+          assert.equal(writes[1].patch.status, "In Progress");
+          assert.equal(appends, 1);
+          assert.equal(field("Status").value, "In Progress");
+          assert.equal(progressInput().disabled, false);
+          assert.equal(progressInput().value, "");
+          assert.deepEqual(recoveredFields(), { "Unposted progress note": "Unsubmitted progress to recover" });
+        }
+      });
+    }
+  }
+}
+
+for (const action of ["Verify & close", "Save changes"]) {
+  test(`${action} retains issue-specific reload and recovery after another issue replaces its warning`, async () => {
+    let first = issue({ transformedInto: "OFI" });
+    let second = issue({ id: 2, qsNumber: 1002, transformedInto: "OFI" });
+    const reloads = [deferred<IIssue>(), deferred<IIssue>()];
+    const readIds: number[] = [];
+    let firstReads = 0;
+    let writes = 0;
+    let appends = 0;
+    await renderApp({
+      updateIssue: async (id: number, patch: Partial<IIssue>, eTag: string) => {
+        assert.equal(id, first.id);
+        assert.equal(eTag, '"1"');
+        assert.equal(patch.status, "Closed");
+        writes += 1;
+        first = { ...first, ...patch, eTag: '"2"' };
+        throw new IssueRefreshError(id);
+      },
+      addProgressLogEntry: async (id: number, entry: IProgressLogEntry) => {
+        assert.equal(id, second.id);
+        appends += 1;
+        const saved = { ...entry, id: appends, saveWarning: `Issue B journal entry ${appends} was saved; reload its details.` };
+        second = { ...second, progressLog: [...second.progressLog, saved] };
+        return saved;
+      },
+      getIssue: (id: number) => {
+        readIds.push(id);
+        if (id === first.id) return reloads[firstReads++].promise;
+        assert.equal(id, second.id);
+        return Promise.resolve(second);
+      },
+    }, [first, second]);
+    await click("Issue register");
+    await openIssue(1001);
+    change("Follow up (Quality Team notes)", "Accepted A assessment");
+    writeProgress("Keep A's unposted evidence");
+    if (action === "Save changes") change("Status", "Closed");
+    await click(action);
+    assertSavedWarning();
+    const recovered = [{ "Unposted progress note": "Keep A's unposted evidence" }];
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(button("Re-open issue").disabled, true);
+    await click("Back to register");
+    await openIssue(1002);
+    writeProgress("B's first observation");
+    await click("Add update");
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 1 was saved/);
+    await click("Reload saved issue");
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.deepEqual(readIds, [second.id]);
+    await click("Back to register");
+    await openIssue(1001);
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(button("Re-open issue").disabled, true);
+    await click("Reload this issue");
+    assert.equal(button("Reload this issue").disabled, true);
+    assert.equal(button("Re-open issue").disabled, true);
+    act(() => { button("Reload this issue").click(); button("Re-open issue").click(); });
+    assert.equal(firstReads, 1);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await act(async () => { reloads[0].reject(new Error("Issue A reload unavailable")); });
+    assert.match(container.querySelector('[role="alert"]')?.textContent || "", /Could not reload this issue: Issue A reload unavailable/);
+    assert.doesNotMatch(container.textContent || "", /failed and was not saved/);
+    assert.match(container.textContent || "", /Closed · read-only/);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(button("Re-open issue").disabled, true);
+    assert.equal(button("Reload this issue").disabled, false);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Back to register");
+    await openIssue(1002);
+    writeProgress("B's second observation");
+    await click("Add update");
+    await click("Back to register");
+    await openIssue(1001);
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 2 was saved/);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Reload this issue");
+    assert.equal(button("Reload this issue").disabled, true);
+    assert.equal(button("Re-open issue").disabled, true);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await act(async () => { reloads[1].resolve(first); });
+    assert.deepEqual(readIds, [second.id, first.id, first.id]);
+    assert.equal(container.querySelector('[role="alert"]'), null);
+    assert.match(container.querySelector('[role="status"]')?.textContent || "", /Issue B journal entry 2 was saved/);
+    assert.equal(button("Re-open issue").disabled, false);
+    assert.equal(Array.from(container.querySelectorAll("button")).some(element => element.textContent === "Reload this issue"), false);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.deepEqual(recoveredCopies(), recovered);
+    await click("Back to register");
+    await openIssue(1001);
+    assert.deepEqual(recoveredCopies(), recovered);
+    assert.equal(button("Re-open issue").disabled, false);
+    assert.equal(writes, 1);
+    assert.equal(appends, 2);
+  });
+}
+
+for (const [profile, eTag] of [["owner", undefined], ["reader", "*"]] as const) {
+  test(`${profile} can reload a read-only issue with an unusable version without gaining edit controls`, async () => {
+    const original = issue({ status: "Closed", eTag });
+    let reads = 0;
+    const services = {
+      getIssue: async (id: number) => { assert.equal(id, original.id); reads += 1; return { ...original, eTag: '"2"' }; },
+    };
+    await renderApp(services, [original]);
+    await click("Issue register");
+    await openIssue();
+    assert.equal(button("Re-open issue").disabled, true);
+    await renderApp(services, [original], { profile, userDisplayName: "Owner", userEmail: "owner@example.com" });
+    assert.equal(container.querySelector('[role="status"]'), null);
+    assert.equal(button("Reload this issue").disabled, false);
+    await click("Reload this issue");
+    assert.equal(reads, 1);
+    assert.equal(container.querySelector("textarea"), null);
+    assert.equal(Array.from(container.querySelectorAll("button")).some(element => ["Reload this issue", "Re-open issue", "Save changes", "Add update"].includes(element.textContent || "")), false);
+  });
+}
+
+for (const action of ["Verify & close", "Save changes"]) {
+  for (const readbackFails of [false, true]) {
+    test(`${action} ${readbackFails ? "accepted readback failure" : "accepted closure"} across remount blocks an already queued append`, async () => {
+      let stored = issue({ transformedInto: "OFI" });
+      const readback = deferred<void>();
+      let writes = 0;
+      let appends = 0;
+      await renderApp({
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          writes += 1;
+          assert.equal(eTag, '"1"');
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          await readback.promise;
+          return stored;
+        },
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => { appends += 1; return entry; },
+        getIssue: async () => stored,
+      }, [stored]);
+      await click("Issue register");
+      await openIssue();
+      change("Follow up (Quality Team notes)", "Accepted before remount");
+      writeProgress("Queued progress must remain recoverable");
+      if (action === "Save changes") change("Status", "Closed");
+      await act(async () => { Simulate.click(button(action)); Simulate.click(button("Add update")); });
+      assert.equal(writes, 1);
+      assert.equal(appends, 0);
+      await click("Back to register");
+      await openIssue();
+      assertFieldsDisabled(true);
+      assert.equal(progressInput().disabled, true);
+      await act(async () => {
+        if (readbackFails) readback.reject(new IssueRefreshError(stored.id));
+        else readback.resolve();
+      });
+      assert.equal(appends, 0);
+      assert.equal(writes, 1);
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.equal(container.querySelector('[role="alert"]'), null);
+      assert.deepEqual(journalText(), []);
+      assert.deepEqual(recoveredFields(), { "Unposted progress note": "Queued progress must remain recoverable" });
+      if (readbackFails) {
+        assertSavedWarning();
+        assert.equal(button("Re-open issue").disabled, true);
+        await click("Reload saved issue");
+      }
+      await click("Back to register");
+      await openIssue();
+      assert.equal(button("Re-open issue").disabled, false);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.deepEqual(recoveredFields(), { "Unposted progress note": "Queued progress must remain recoverable" });
+      assert.equal(appends, 0);
+    });
+  }
+}
+
+test("accepted append clears only its submitted text while a detail draft remains recoverable", async () => {
+  const original = issue();
+  const entry = { id: 41, text: "Accepted progress", author: "Quality Manager", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+  await renderApp({
+    addProgressLogEntry: async (_id: number, submitted: IProgressLogEntry) => { assert.equal(submitted.text, entry.text); return entry; },
+    getIssue: async () => ({ ...original, status: "Closed", eTag: '"2"', progressLog: [entry] }),
+  }, [original]);
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Unsubmitted assessment");
+  writeProgress("  Accepted progress  ");
+  await click("Add update");
+  await click("Reload saved issue");
+  assert.deepEqual(recoveredFields(), { "Quality Team notes": "Unsubmitted assessment" });
+  assert.deepEqual(journalText(), [entry.text]);
+});
+
+test("accepted detail and progress submissions do not leave false recovery content", async () => {
+  let stored = issue();
+  const entry = { id: 42, text: "Accepted progress", author: "Quality Manager", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>) => { stored = { ...stored, ...patch, eTag: '"2"' }; return stored; },
+    addProgressLogEntry: async () => { stored = { ...stored, progressLog: [entry] }; return entry; },
+    getIssue: async () => ({ ...stored, status: "Closed", eTag: '"3"' }),
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  change("Follow up (Quality Team notes)", "Accepted assessment");
+  writeProgress(entry.text);
+  await click("Save changes");
+  assert.equal(progressInput().value, entry.text);
+  await click("Add update");
+  await click("Reload saved issue");
+  assert.equal(recoveryPanel(), null);
+  assert.equal(container.querySelector("textarea"), null);
+  assert.deepEqual(journalText(), [entry.text]);
+});
+
+test("a hold dialog draft survives a refresh that closes its issue", async () => {
+  const original = issue();
+  const entry = { id: 43, text: "Accepted progress", author: "Quality Manager", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+  await renderApp({
+    addProgressLogEntry: async () => entry,
+    getIssue: async () => ({ ...original, status: "Closed", eTag: '"2"', progressLog: [entry] }),
+  }, [original]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress(entry.text);
+  await click("Add update");
+  await click("Put on hold");
+  const until = addCalendarDays(todayDate(), 7);
+  change("Reason for hold *", "Waiting for replacement equipment");
+  change("Resume work on *", until);
+  await click("Reload saved issue");
+  assert.deepEqual(recoveredFields(), { "Reason for hold": "Waiting for replacement equipment", "Resume work on": until });
+  assert.equal(container.querySelector("textarea"), null);
+});
+
+test("rejected detail and progress submissions remain recoverable after external closure", async () => {
+  const original = issue();
+  const entry = { id: 44, text: "Accepted observation", author: "Quality Manager", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+  let appends = 0;
+  await renderApp({
+    addProgressLogEntry: async () => { if (++appends > 1) throw new Error("Append rejected"); return entry; },
+    updateIssue: async () => { throw new Error("Detail rejected"); },
+    getIssue: async () => ({ ...original, status: "Closed", eTag: '"2"', progressLog: [entry] }),
+  }, [original]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress(entry.text);
+  await click("Add update");
+  change("Follow up (Quality Team notes)", "Rejected assessment");
+  await click("Save changes");
+  writeProgress("Rejected progress");
+  await click("Add update");
+  await click("Reload saved issue");
+  assert.deepEqual(recoveredFields(), { "Quality Team notes": "Rejected assessment", "Unposted progress note": "Rejected progress" });
+  assert.equal(container.querySelector("textarea"), null);
+});
+
+test("accepted hold fields do not leave a recovery draft", async () => {
+  let stored = issue({ transformedInto: "OFI" });
+  const entry = { id: 45, text: "Accepted observation", author: "Quality Manager", ts: new Date().toISOString(), saveWarning: "Your update was posted. Reload its server details." };
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>) => { stored = { ...stored, ...patch, eTag: '"2"' }; return stored; },
+    addProgressLogEntry: async () => entry,
+    getIssue: async () => ({ ...stored, status: "Closed", eTag: '"3"', progressLog: [entry] }),
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  await click("Put on hold");
+  change("Reason for hold *", "  Awaiting parts  ");
+  change("Resume work on *", addCalendarDays(todayDate(), 7));
+  const confirms = Array.from(container.querySelectorAll("button")).filter(candidate => candidate.textContent === "Put on hold");
+  await act(async () => { Simulate.click(confirms[confirms.length - 1]); });
+  assert.equal(stored.holdReason, "Awaiting parts");
+  writeProgress(entry.text);
+  await click("Add update");
+  await click("Reload saved issue");
+  assert.equal(recoveryPanel(), null);
+});
+
+test("reopened recovery stays visible through initialization, audit writes and matching fresh submissions", async () => {
+  let stored = issue({ transformedInto: "OFI", status: "Created" });
+  const patches: { patch: Partial<IIssue>; eTag: string }[] = [];
+  const entries: IProgressLogEntry[] = [];
+  const auditText = "Issue re-opened — corrective-action cycle restarted. Previous close: —.";
+  let failNextSave = false;
+  await renderApp({
+    getIssue: async () => stored,
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      patches.push({ patch, eTag });
+      if (failNextSave) { failNextSave = false; throw new IssueConflictError(stored.id, stored); }
+      stored = { ...stored, ...patch, eTag: `"${patches.length + 2}"` };
+      return stored;
+    },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      const accepted = { ...entry, id: entries.length + 1, saveWarning: "Your update was posted. Reload its server details." };
+      entries.push(accepted);
+      stored = { ...stored, progressLog: [...entries] };
+      return accepted;
+    },
+  }, [stored]);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Accepted observation");
+  await click("Add update");
+  change("Status", "In Progress");
+  change("Follow up (Quality Team notes)", "Recovered assessment");
+  writeProgress(auditText);
+  stored = { ...stored, status: "Closed", eTag: '"2"' };
+  await click("Reload saved issue");
+  const recovered = { Status: "In Progress", "Quality Team notes": "Recovered assessment", "Unposted progress note": auditText };
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  assert.equal(patches.length, 0);
+  await click("Re-open issue");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  assert.equal(field("Follow up (Quality Team notes)").value, "");
+  assert.equal(progressInput().value, "");
+  assert.equal(entries[1].text, auditText);
+  assert.equal(patches[0].patch.followUp, undefined);
+  assert.equal(patches[0].eTag, '"2"');
+  change("Follow up (Quality Team notes)", "Recovered assessment");
+  writeProgress(auditText);
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  await click("Save changes");
+  assert.equal(patches[1].eTag, '"3"');
+  assert.equal(progressInput().value, auditText);
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  await click("Add update");
+  assert.equal(progressInput().value, "");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  failNextSave = true;
+  change("Follow up (Quality Team notes)", "A conflicting fresh assessment");
+  writeProgress("Keep the live progress draft");
+  await click("Save changes");
+  await click("Reload latest and discard draft");
+  assert.equal(field("Follow up (Quality Team notes)").value, "Recovered assessment");
+  assert.equal(progressInput().value, "Keep the live progress draft");
+  assert.deepEqual(recoveredCopies(), [recovered]);
+  const content = recoveryPanel()?.querySelector("dl");
+  assert.ok(content);
+  assert.equal(window.getComputedStyle(content).userSelect, "text");
+  change("Follow up (Quality Team notes)", "Keep the live detail draft");
+  await discardRecoveredCopy(0);
+  assert.equal(recoveryPanel(), null);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Keep the live detail draft");
+  assert.equal(progressInput().value, "Keep the live progress draft");
+  assert.equal(button("Save changes").disabled, false);
+  assert.equal(button("Add update").disabled, false);
+  assert.equal(patches.length, 3);
+  assert.equal(entries.length, 3);
+});
+
+for (const identical of [false, true]) {
+  test(`repeated close and reopen retains ${identical ? "identical" : "distinct"} recovery copies and discards only the selected copy`, async () => {
+    let stored = issue({ transformedInto: "OFI" });
+    let writes = 0;
+    let appends = 0;
+    await renderApp({
+      getIssue: async () => stored,
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        assert.equal(eTag, stored.eTag);
+        writes += 1;
+        stored = { ...stored, ...patch, eTag: `"write-${writes}"` };
+        return stored;
+      },
+      addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+        const accepted = { ...entry, id: ++appends, saveWarning: "Your update was posted. Reload its server details." };
+        stored = { ...stored, progressLog: [...stored.progressLog, accepted] };
+        return accepted;
+      },
+    }, [stored]);
+    await click("Issue register");
+    await openIssue();
+    writeProgress("Accepted observation");
+    await click("Add update");
+    const copies: Record<string, string>[] = [];
+    for (let round = 0; round < 2; round++) {
+      const suffix = identical ? "same" : String(round + 1);
+      change("Follow up (Quality Team notes)", `Assessment ${suffix}`);
+      writeProgress(`Evidence ${suffix}`);
+      stored = { ...stored, status: "Closed", eTag: `"close-${round}"` };
+      await click("Reload saved issue");
+      copies.push({ "Quality Team notes": `Assessment ${suffix}`, "Unposted progress note": `Evidence ${suffix}` });
+      assert.deepEqual(recoveredCopies(), copies);
+      await click("Back to register");
+      await openIssue();
+      assert.deepEqual(recoveredCopies(), copies);
+      await click("Re-open issue");
+      assert.deepEqual(recoveredCopies(), copies);
+      assert.equal(field("Follow up (Quality Team notes)").value, "");
+      assert.equal(progressInput().value, "");
+    }
+    assert.equal(writes, 2);
+    assert.equal(appends, 3);
+    change("Follow up (Quality Team notes)", "Fresh live assessment");
+    writeProgress("Fresh live evidence");
+    await discardRecoveredCopy(0);
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Fresh live assessment");
+    assert.equal(progressInput().value, "Fresh live evidence");
+    await click("Save changes");
+    await click("Add update");
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    stored = { ...stored, status: "Closed", eTag: '"final-close"' };
+    await click("Reload saved issue");
+    assert.deepEqual(recoveredCopies(), [copies[1]]);
+    await discardRecoveredCopy(0);
+    assert.equal(recoveryPanel(), null);
+    assert.equal(writes, 3);
+    assert.equal(appends, 4);
+  });
+}
+
+test("owner recovery survives reassignment away and back, matching fresh writes, and another reassignment", async () => {
+  let stored = issue({ status: "Created" });
+  const identity = { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" };
+  let writes = 0;
+  let appends = 0;
+  const services = {
+    getIssue: async () => stored,
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      assert.equal(eTag, stored.eTag);
+      writes += 1;
+      stored = { ...stored, ...patch, eTag: `"write-${writes}"` };
+      return stored;
+    },
+    addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => {
+      const accepted = { ...entry, id: ++appends, saveWarning: "Your update was posted. Reload its server details." };
+      stored = { ...stored, progressLog: [...stored.progressLog, accepted] };
+      return accepted;
+    },
+  };
+  await renderApp(services, [stored], identity);
+  await click("Issue register");
+  await openIssue();
+  writeProgress("Accepted observation");
+  await click("Add update");
+  const date = addCalendarDays(todayDate(), -3);
+  change("Status", "In Progress");
+  change("Implementation date", date);
+  writeProgress("Owner evidence");
+  stored = { ...stored, taskOwnerEmail: "replacement@example.com", eTag: '"away-1"' };
+  await click("Reload saved issue");
+  const first = { Status: "In Progress", "Implementation date": date, "Unposted progress note": "Owner evidence" };
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(container.querySelector("textarea"), null);
+  stored = { ...stored, taskOwnerEmail: "owner@example.com", eTag: '"back-1"' };
+  await renderApp(services, [stored], identity);
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(field("Status").value, "Created");
+  assert.equal(progressInput().value, "");
+  change("Status", "In Progress");
+  change("Implementation date", date);
+  writeProgress("Owner evidence");
+  await click("Save progress");
+  await click("Add update");
+  assert.deepEqual(recoveredCopies(), [first]);
+  change("Status", "Created");
+  writeProgress("Second owner draft");
+  stored = { ...stored, taskOwnerEmail: "replacement@example.com", eTag: '"away-2"' };
+  await click("Reload saved issue");
+  const second = { Status: "Created", "Unposted progress note": "Second owner draft" };
+  assert.deepEqual(recoveredCopies(), [first, second]);
+  stored = { ...stored, taskOwnerEmail: "owner@example.com", eTag: '"back-2"' };
+  await renderApp(services, [stored], identity);
+  assert.deepEqual(recoveredCopies(), [first, second]);
+  assert.equal(field("Status").value, "In Progress");
+  const nextDate = addCalendarDays(todayDate(), -1);
+  change("Implementation date", nextDate);
+  writeProgress("Fresh owner draft");
+  await discardRecoveredCopy(1);
+  assert.deepEqual(recoveredCopies(), [first]);
+  assert.equal(field("Implementation date").value, nextDate);
+  assert.equal(progressInput().value, "Fresh owner draft");
+  await discardRecoveredCopy(0);
+  assert.equal(recoveryPanel(), null);
+  await click("Save progress");
+  await click("Add update");
+  assert.equal(recoveryPanel(), null);
+  assert.equal(writes, 2);
+  assert.equal(appends, 3);
+});
+
+
+function acceptedBackendHarness(operation: "create" | "progress", headers = false) {
+  const state = { issues: [issue()], writes: [] as any[], failReload: false };
+  const response = (value: unknown, status = 200, receiptHeaders: Record<string, string> = {}, malformed = false) => ({
+    ok: true, status, statusText: "", headers: { get: (name: string) => receiptHeaders[name] || null },
+    json: async () => { if (malformed) throw new Error("Invalid JSON"); return value; },
+  });
+  const service = new BackendApiDataService({ request: async (path: string, method = "GET", body?: any) => {
+    if (method === "GET") {
+      if (state.failReload) throw new Error("Readback unavailable");
+      return response(path === "/settings" ? { msFormUrl: "", flowId: "", access: [] } : path === "/issues" ? state.issues : state.issues[0]);
+    }
+    state.writes.push({ path, body });
+    if (operation === "create") {
+      const saved = issue({ ...body, id: 20 + state.writes.length, qsNumber: 3020 + state.writes.length, progressLog: [] });
+      state.issues.push(saved);
+      return response(saved, 201, headers ? { Location: `/issues/${saved.id}`, "X-QStar-Reference": String(saved.qsNumber) } : {}, state.writes.length === 1);
+    }
+    const saved = { id: 70 + state.writes.length, author: "API user", authorId: 7, authorEmail: "api@example.com", ts: "2026-09-28T12:00:00Z", text: body.text };
+    state.issues[0] = { ...state.issues[0], progressLog: [...state.issues[0].progressLog, saved] };
+    return response(saved, 201, headers ? { Location: `/issues/1/progress/${saved.id}` } : {}, state.writes.length === 1);
+  } });
+  const props = { dataService: service, connection: { dataSourceMode: "backend", backendBaseUrl: `https://api.example.com/${operation}-${headers}`, siteUrl: "https://tenant.sharepoint.com/sites/api", issuesListName: "API Issues", progressListName: "API Journal", betaAccessMode: false } };
+  return { state, props };
+}
+
+for (const headers of [false, true]) {
+test(`malformed accepted create ${headers ? "with" : "without"} headers blocks resubmit across navigation/remount until successful recovery`, async () => {
+  const { state, props } = acceptedBackendHarness("create", headers);
+  await renderApp({}, [], props);
+  await click("Report"); fillReport(); await click("Submit report");
+  assert.equal(state.writes.length, 1); assert.equal(field("Short summary *").value, "");
+  assert.equal(field("Short summary *").disabled, true);
+  assert.equal(button("Submit report").disabled, true); assert.match(container.textContent || "", /submission may have been saved/);
+  assert.doesNotMatch(container.textContent || "", /change failed and was not saved/);
+  await click("Issue register"); await click("Report"); assert.equal(button("Submit report").disabled, true);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Report"); assert.equal(button("Submit report").disabled, true);
+  const receipts = JSON.parse(window.sessionStorage.getItem(`qstar-accepted:${JSON.stringify([props.connection, "qm@example.com"])}`)!);
+  assert.equal(receipts.create.issueId, headers ? 21 : undefined);
+  assert.equal(receipts.create.qsNumber, headers ? 3021 : undefined);
+  state.failReload = true; await click("Reload saved data"); assert.equal(button("Submit report").disabled, true);
+  state.failReload = false; await click("Reload saved data");
+  assert.equal(field("Short summary *").value, ""); assert.equal(button("Submit report").disabled, true);
+  fillReport(); change("Short summary *", "Deliberate new report"); await click("Submit report");
+  assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.shortSummary, "Deliberate new report");
+});
+
+test(`malformed accepted progress ${headers ? "with" : "without"} headers survives remount and preserves unrelated detail through recovery`, async () => {
+  const { state, props } = acceptedBackendHarness("progress", headers);
+  await renderApp({}, [], props); await click("Issue register"); await openIssue();
+  change("Follow up (Quality Team notes)", "Unsubmitted independent detail");
+  writeProgress("Accepted observation"); await click("Add update");
+  assert.equal(state.writes.length, 1); assert.equal(button("Add update").disabled, true);
+  assert.equal(progressInput().disabled, true);
+  assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted independent detail");
+  await click("Back to register"); await openIssue(); assert.equal(button("Add update").disabled, true);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Issue register"); await openIssue(); assert.equal(button("Add update").disabled, true);
+  assert.equal(progressInput().disabled, true);
+  const receipts = JSON.parse(window.sessionStorage.getItem(`qstar-accepted:${JSON.stringify([props.connection, "qm@example.com"])}`)!);
+  assert.equal(receipts["progress:1"].issueId, 1);
+  assert.equal(receipts["progress:1"].entryId, headers ? 71 : undefined);
+  state.failReload = true; await click("Reload saved data"); assert.equal(button("Add update").disabled, true);
+  state.failReload = false; await click("Reload saved data");
+  assert.equal(progressInput().disabled, false);
+  const textarea = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
+  assert.equal(textarea.value, ""); assert.equal(button("Add update").disabled, true);
+  writeProgress("Deliberate fresh observation"); await click("Add update");
+  assert.equal(state.writes.length, 2); assert.equal(state.writes[1].body.text, "Deliberate fresh observation");
+});
+}
+
+test("backend wrapper uses verified caller and connection and never shows stale direct targets", async () => {
+  const dataService = { loadIssues: async () => [], loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }) };
+  const props = { dataService, description: "", isDarkTheme: false, environmentMessage: "", hasTeamsContext: false,
+    userDisplayName: "Stale caller", userEmail: "stale@example.com", connection: { siteUrl: "https://wrong.sharepoint.com", issuesListName: "Wrong", progressListName: "Wrong", betaAccessMode: true },
+    runConnectionDiagnostics: async () => [], roleResolver: { resolve: async () => ({ role: "admin", source: "backend", user: { userId: 7, displayName: "Verified caller", email: "verified@example.com" },
+      connection: { dataSourceMode: "backend", backendBaseUrl: "https://api.example.com/api/v1", siteUrl: "https://right.sharepoint.com/sites/qstar", issuesListName: "Actual Issues", progressListName: "Actual Journal", betaAccessMode: false } }) } };
+  await act(async () => { ReactDOM.render(React.createElement(QstarIssueManager, props), container); });
+  await click("IT settings");
+  assert.match(container.textContent || "", /Verified caller/); assert.match(container.textContent || "", /Actual Issues/); assert.match(container.textContent || "", /right.sharepoint.com/);
+  assert.match(container.textContent || "", /Verified Entra application roles/); assert.doesNotMatch(container.textContent || "", /Stale caller|wrong.sharepoint.com/);
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await act(async () => { ReactDOM.render(React.createElement(QstarIssueManager, { ...props, roleResolver: { resolve: async () => ({ role: "admin", source: "backend" }) } }), container); });
+  assert.match(container.textContent || "", /Access is disabled/); assert.doesNotMatch(container.textContent || "", /IT settings/);
+});
+
+test("connection remount ignores a late old /me role and renders only the new verified connection", async () => {
+  const old = deferred<any>();
+  const next = deferred<any>();
+  let oldLoads = 0;
+  const shared = { description: "", isDarkTheme: false, environmentMessage: "", hasTeamsContext: false, userDisplayName: "Page User", userEmail: "page@example.com",
+    connection: { siteUrl: "https://stale.sharepoint.com", issuesListName: "Stale", progressListName: "Stale", betaAccessMode: false },
+    runConnectionDiagnostics: async () => [], dataService: { loadIssues: async () => [], loadSettings: async () => ({ msFormUrl: "", flowId: "", access: [] }) } };
+  render(QstarIssueManager, { ...shared, key: "old", dataService: { ...shared.dataService, loadIssues: async () => { oldLoads += 1; return []; } }, roleResolver: { resolve: () => old.promise } });
+  render(QstarIssueManager, { ...shared, key: "new", roleResolver: { resolve: () => next.promise } });
+  await act(async () => { old.resolve({ role: "admin", source: "backend", user: { userId: 1, displayName: "Old Admin", email: "old@example.com" }, connection: shared.connection }); });
+  assert.equal(oldLoads, 0); assert.match(container.textContent || "", /Checking your Q-Star access/);
+  await act(async () => { next.resolve({ role: "reader", source: "backend", user: { userId: 2, displayName: "Current Reader", email: "current@example.com" }, connection: { ...shared.connection, siteUrl: "https://current.sharepoint.com", dataSourceMode: "backend" } }); });
+  assert.match(container.textContent || "", /Current Reader/); assert.doesNotMatch(container.textContent || "", /Old Admin|IT settings/);
+});
+
+test("late accepted create consumes its old form while preserving a newer unsubmitted draft", async () => {
+  const accepted = deferred<any>();
+  const submitted: any[] = [];
+  const reply = (value: any, malformed = false) => ({ ok: true, status: 201, statusText: "", headers: { get: () => null }, json: async () => { if (malformed) throw new Error("Unreadable"); return value; } });
+  const service = new BackendApiDataService({ request: async (path: string, method = "GET", body?: any) => {
+    if (method === "GET") return reply(path === "/settings" ? {} : []);
+    submitted.push(body);
+    return submitted.length === 1 ? accepted.promise : reply(issue({ ...body, id: 2, qsNumber: 3002 }));
+  } });
+  await renderApp({}, [], { dataService: service, userEmail: "late-create@example.com" });
+  await click("Report"); fillReport(); await click("Submit report");
+  await click("Issue register"); await click("Report"); fillReport(); change("Short summary *", "Newer unsubmitted report");
+  await act(async () => { accepted.resolve(reply(undefined, true)); });
+  assert.equal(field("Short summary *").value, "Newer unsubmitted report"); assert.equal(button("Submit report").disabled, true);
+  await click("Reload saved data"); assert.equal(field("Short summary *").value, "Newer unsubmitted report");
+  await click("Submit report"); assert.equal(submitted.length, 2); assert.equal(submitted[1].shortSummary, "Newer unsubmitted report");
+});
+
+test("a recovery read cannot clear another issue's newer accepted-write quarantine", async () => {
+  const delayed = deferred<IIssue[]>();
+  let reads = 0;
+  const writes: number[] = [];
+  const initial = [issue(), issue({ id: 2, qsNumber: 1002 })];
+  const userEmail = "recovery-race@example.com";
+  const service = {
+    loadIssues: async () => { reads += 1; return reads === 2 ? delayed.promise : initial; },
+    addProgressLogEntry: async (id: number) => { writes.push(id); throw new AcceptedWriteError("progress"); },
+  };
+  await renderApp(service, initial, { userEmail }); await click("Issue register"); await openIssue(1001);
+  writeProgress("First accepted observation"); await click("Add update");
+  await click("Reload saved data");
+  await click("Back to register"); await openIssue(1002); writeProgress("Second accepted observation"); await click("Add update");
+  await act(async () => { delayed.resolve(initial); });
+  assert.equal(button("Add update").disabled, true); assert.match(container.textContent || "", /Second accepted observation/);
+  assert.ok(button("Reload saved data")); assert.deepEqual(writes, [1, 2]);
+  await click("Back to register"); await openIssue(1001);
+  const firstText = container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!;
+  assert.equal(firstText.disabled, true); assert.equal(firstText.value, "");
+  assert.match(container.textContent || "", /Issues changed during the reload/);
+  await click("Reload saved data");
+  assert.equal(progressInput().disabled, false);
+  await click("Back to register"); await openIssue(1002);
+  assert.equal(container.querySelector<HTMLTextAreaElement>('textarea[placeholder="What did you do? What are the next steps or blockers?"]')!.value, "");
+  assert.equal(button("Add update").disabled, true);
+});
+
+test("an accepted response arriving after App remount still quarantines the current connection", async () => {
+  const pending = deferred<any>();
+  let writes = 0;
+  const response = (value: any, malformed = false) => ({ ok: true, status: 201, statusText: "", headers: { get: () => null }, json: async () => { if (malformed) throw new Error("Malformed receipt"); return value; } });
+  const dataService = new BackendApiDataService({ request: async (path: string, method = "GET") => {
+    if (method === "GET") return response(path === "/settings" ? {} : []);
+    writes += 1; return pending.promise;
+  } });
+  const props = { dataService, userEmail: "remount-inflight@example.com" };
+  await renderApp({}, [], props); await click("Report"); fillReport(); await click("Submit report");
+  act(() => { ReactDOM.unmountComponentAtNode(container); });
+  await renderApp({}, [], props); await click("Report"); fillReport(); change("Short summary *", "Unsubmitted newer report");
+  await act(async () => { pending.resolve(response(undefined, true)); });
+  assert.equal(writes, 1); assert.equal(button("Submit report").disabled, true);
+  assert.equal(field("Short summary *").value, "Unsubmitted newer report");
+  await click("Reload saved data");
+  assert.equal(field("Short summary *").value, "Unsubmitted newer report"); assert.equal(button("Submit report").disabled, false);
+});
+
+for (const operation of ["append", "create", "Verify & close", "Save changes", "Verify & close readback failure", "Save changes readback failure"]) {
+  test(`delayed recovery preserves a newer ${operation}, drafts and guards until a fresh GET`, async () => {
+    const delayed = deferred<IIssue[]>();
+    let stored = [issue(), issue({ id: 2, qsNumber: 1002, transformedInto: "OFI" })];
+    let stale: IIssue[] = [];
+    let reads = 0;
+    const appends: number[] = [];
+    let creates = 0;
+    let updates = 0;
+    await renderApp({
+      loadIssues: async () => {
+        reads += 1;
+        if (reads === 2) { stale = structuredClone(stored); return delayed.promise; }
+        return structuredClone(stored);
+      },
+      addProgressLogEntry: async (id: number, entry: IProgressLogEntry) => {
+        appends.push(id);
+        const accepted = { ...entry, id: 70 + appends.length };
+        stored = stored.map(item => item.id === id ? { ...item, progressLog: [...item.progressLog, accepted] } : item);
+        if (id === 1) throw new AcceptedWriteError("progress");
+        return accepted;
+      },
+      updateIssue: async (id: number, patch: Partial<IIssue>) => {
+        updates += 1;
+        stored = stored.map(item => item.id === id ? { ...item, ...patch, eTag: '"2"' } : item);
+        if (operation.endsWith("readback failure")) throw new IssueRefreshError(id);
+        return stored.find(item => item.id === id)!;
+      },
+      createIssue: async (form: Partial<IIssue>) => {
+        creates += 1;
+        const saved = issue({ ...form, id: 3, qsNumber: 1003 });
+        stored = [...stored, saved];
+        return saved;
+      },
+    }, stored, { userEmail: `revision-${operation}@example.com` });
+    await click("Issue register"); await openIssue(1001);
+    writeProgress("A accepted observation"); await click("Add update");
+    await click("Reload saved data");
+    await click("Back to register");
+    if (operation === "create") {
+      await click("Report"); fillReport(); await click("Submit report");
+      await click("Report another"); fillReport(); change("Short summary *", "Unsubmitted next report");
+    } else {
+      await openIssue(1002);
+      change("Follow up (Quality Team notes)", "Independent detail on B");
+      writeProgress("B observation");
+      if (operation === "append") {
+        await click("Add update");
+        assert.equal(stored[1].eTag, '"1"');
+        writeProgress("B unposted next observation");
+      } else {
+        if (operation.startsWith("Save changes")) change("Status", "Closed");
+        await click(operation.startsWith("Save changes") ? "Save changes" : "Verify & close");
+        assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+      }
+    }
+    await act(async () => { delayed.resolve(stale); });
+    assert.match(container.textContent || "", /Issues changed during the reload/);
+    if (operation === "append") {
+      assert.match(container.querySelector("ol")?.textContent || "", /B observation/);
+      assert.equal(field("Follow up (Quality Team notes)").value, "Independent detail on B");
+      assert.equal(progressInput().value, "B unposted next observation");
+    } else if (operation === "create") {
+      assert.equal(field("Short summary *").value, "Unsubmitted next report");
+      assert.ok(button("Triage queue1"));
+    } else {
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.equal(container.querySelector("textarea"), null);
+      assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+      assert.equal(button("Re-open issue").disabled, operation.endsWith("readback failure"));
+    }
+    await click("Reload saved data");
+    if (operation === "append") {
+      assert.match(container.querySelector("ol")?.textContent || "", /B observation/);
+      assert.equal(field("Follow up (Quality Team notes)").value, "Independent detail on B");
+      assert.equal(progressInput().value, "B unposted next observation");
+    } else if (operation === "create") {
+      assert.equal(field("Short summary *").value, "Unsubmitted next report");
+      await click("Triage queue1");
+      assert.match(container.textContent || "", /QS-1003/);
+      await click("Issue register");
+    } else {
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.deepEqual(recoveredCopies(), [{ "Unposted progress note": "B observation" }]);
+    }
+    if (operation !== "create") await click("Back to register");
+    await openIssue(1001);
+    assert.equal(progressInput().disabled, false);
+    assert.equal(progressInput().value, "");
+    assert.match(container.querySelector("ol")?.textContent || "", /A accepted observation/);
+    assert.deepEqual(appends, operation === "append" ? [1, 2] : [1]);
+    assert.equal(creates, operation === "create" ? 1 : 0);
+    assert.equal(updates, ["append", "create"].includes(operation) ? 0 : 1);
+    assert.equal(reads, 3);
+  });
+}
+
+async function waitForUi(condition: () => boolean): Promise<void> {
+  await act(async () => {
+    for (let attempt = 0; attempt < 200 && !condition(); attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  });
+  assert.ok(condition(), "The pending UI operation should settle");
+}
+
+function hasButton(text: string): boolean {
+  return Array.from(container.querySelectorAll("button")).some(candidate => candidate.textContent === text);
+}
+
+const directIssue = () => ({
+  Id: 1, QsNumber: 1001, ShortSummary: "Cold-chain breach", Description: "Reported", Severity: "High", ReportDate: "2026-06-01",
+  Triaged: "Yes", TaskCreated: "Yes", Status: "In Progress", TransformedInto: "OFI", "odata.etag": '"1"',
+  TaskOwner: { Id: 7, Title: "Owner", EMail: "owner@example.com" },
+});
+
+for (const operation of ["create", "progress"] as const) {
+  test(`direct PnP ${operation} accepted unreadable response blocks duplicate POST through navigation/remount and failed recovery`, async () => {
+    const h = sharePointHttpHarness([directIssue()]);
+    const mutations = () => h.state.requests.filter(call => call.method === "POST" && !call.path.toLowerCase().endsWith("/ensureuser"));
+    const props = { dataService: h.service, userEmail: `direct-${operation}@example.com` };
+    h.state.reply = () => new Response(operation === "create" ? "null" : "malformed", { status: operation === "create" ? 201 : 200 });
+    try {
+      await renderApp({}, [], props); await waitForUi(() => hasButton("Issue register"));
+      if (operation === "create") { await click("Report"); fillReport(); await click("Submit report"); }
+      else {
+        await click("Issue register"); await openIssue();
+        change("Follow up (Quality Team notes)", "Unsubmitted direct detail");
+        writeProgress("Accepted direct observation"); await click("Add update");
+      }
+      await waitForUi(() => hasButton("Reload saved data"));
+      const assertGuard = () => {
+        assert.match(container.textContent || "", /submission may have been saved/);
+        assert.match(container.textContent || "", /check the register or progress log before resubmitting/);
+        assert.doesNotMatch(container.textContent || "", /submission was saved|Your submission was saved/);
+        if (operation === "create") { assert.equal(field("Short summary *").disabled, true); assert.equal(field("Short summary *").value, ""); }
+        else { assert.equal(progressInput().disabled, true); assert.equal(progressInput().value, ""); }
+      };
+      assertGuard();
+      if (operation === "progress") assert.equal(field("Follow up (Quality Team notes)").value, "Unsubmitted direct detail");
+      assert.equal(mutations().length, 1);
+      if (operation === "create") { await click("Issue register"); await click("Report"); }
+      else { await click("Back to register"); await openIssue(); }
+      assertGuard();
+      act(() => { ReactDOM.unmountComponentAtNode(container); });
+      await renderApp({}, [], props); await waitForUi(() => hasButton("Issue register"));
+      if (operation === "create") await click("Report");
+      else { await click("Issue register"); await openIssue(); }
+      assertGuard();
+      h.state.failReads = true;
+      await click("Reload saved data"); await waitForUi(() => hasButton("Reload saved data")); assertGuard();
+      assert.match(container.textContent || "", /Reload is still unavailable/);
+      h.state.failReads = false;
+      await click("Reload saved data"); await waitForUi(() => !hasButton("Reloading saved data…") && !hasButton("Reload saved data"));
+      if (operation === "create") assert.equal(field("Short summary *").disabled, false);
+      else { assert.equal(progressInput().disabled, false); assert.match(container.querySelector("ol")?.textContent || "", /Accepted direct observation/); }
+      assert.equal(mutations().length, 1);
+    } finally { h.restore(); }
+  });
+}
+
+test("direct accepted append displays unknown native audit details until reload without reposting", async () => {
+  const h = sharePointHttpHarness([directIssue()]);
+  h.state.failProgressRead = true;
+  try {
+    await renderApp({}, [], { dataService: h.service, userEmail: "native-audit@example.com" });
+    await waitForUi(() => hasButton("Issue register"));
+    await click("Issue register"); await openIssue(); writeProgress("Accepted without native readback"); await click("Add update");
+    await waitForUi(() => hasButton("Reload saved issue"));
+    const journal = () => container.querySelector("ol")?.textContent || "";
+    assert.match(journal(), /Awaiting server author/);
+    assert.match(journal(), /Awaiting server details/);
+    assert.doesNotMatch(journal(), /Quality Manager|Invalid Date/);
+    assert.equal(progressInput().value, "");
+    h.state.failProgressRead = false;
+    await click("Reload saved issue"); await waitForUi(() => journal().includes("Native author"));
+    assert.doesNotMatch(journal(), /Awaiting server|Invalid Date/);
+    assert.equal(h.state.requests.filter(call => call.method === "POST").length, 1);
+  } finally { h.restore(); }
+});
+
+for (const remoteStatus of ["Created", "Closed"] as const) {
+  test(`receipt recovery archives B's triage draft after external ${remoteStatus} without losing A's archive`, async () => {
+    let stored = [issue({ transformedInto: "OFI" }), issue({ id: 2, qsNumber: 1002, triaged: false, status: undefined, transformedInto: undefined, taskCreated: "No", taskOwner: "", taskOwnerEmail: "" })];
+    const updateIds: number[] = [];
+    const appendIds: number[] = [];
+    let loads = 0;
+    await renderApp({
+      loadIssues: async () => { loads += 1; return stored; },
+      getIssue: async (id: number) => stored.find(item => item.id === id),
+      updateIssue: async (id: number, patch: Partial<IIssue>) => {
+        updateIds.push(id);
+        stored = stored.map(item => item.id === id ? { ...item, ...patch, eTag: '"reopened"' } : item);
+        return stored.find(item => item.id === id);
+      },
+      addProgressLogEntry: async (id: number, entry: IProgressLogEntry) => {
+        appendIds.push(id);
+        const saved = { ...entry, id: 80 + appendIds.length };
+        stored = stored.map(item => item.id === id ? { ...item, progressLog: [...item.progressLog, saved] } : item);
+        if (appendIds.length === 2) throw new AcceptedWriteError("progress", { issueId: id, entryId: saved.id });
+        return { ...saved, saveWarning: "Your update was posted. Reload its server details." };
+      },
+    }, stored, { userEmail: `triage-recovery-${remoteStatus}@example.com` });
+    await click("Issue register"); await openIssue(1001);
+    writeProgress("Accepted A observation"); await click("Add update");
+    change("Follow up (Quality Team notes)", "Retained A assessment");
+    writeProgress("Retained A draft");
+    stored = stored.map(item => item.id === 1 ? { ...item, status: "Closed", eTag: '"closed"' } : item);
+    await click("Reload saved issue");
+    const earlierArchive = { "Quality Team notes": "Retained A assessment", "Unposted progress note": "Retained A draft" };
+    assert.deepEqual(recoveredCopies(), [earlierArchive]);
+    await click("Re-open issue");
+    assert.equal(progressInput().disabled, true);
+    assert.deepEqual(recoveredCopies(), [earlierArchive]);
+    await click("Back to register"); await click("Triage queue1"); await openIssue(1002);
+    const dueDate = addCalendarDays(todayDate(), 10);
+    change("Transform into", "NC Major");
+    change("Task owner (gets reminders)", "Draft Owner");
+    change("Task owner Microsoft 365 email", "draft-owner@example.com");
+    change("Escalation BU", "IT");
+    change("Due date", dueDate);
+    change("Follow up note (optional)", "Unsubmitted triage assessment\nKeep this assignment");
+    stored = stored.map(item => item.id === 2 ? { ...item, triaged: true, status: remoteStatus, transformedInto: "OFI", taskCreated: "Yes", taskOwner: "Server Owner", taskOwnerEmail: "server-owner@example.com", followUp: "Server assessment", eTag: '"server-triage"' } : item);
+    await click("Reload saved data");
+    const triageCopy = {
+      "Transformed into": "NC Major", "Task owner": "Draft Owner", "Task owner Microsoft 365 email": "draft-owner@example.com",
+      "Escalation BU": "IT", "Due date": dueDate, "Quality Team notes": "Unsubmitted triage assessment\nKeep this assignment",
+    };
+    assert.deepEqual(recoveredCopies(), [triageCopy]);
+    assert.equal(window.getComputedStyle(recoveryPanel()!.querySelector("dl")!).userSelect, "text");
+    assert.doesNotMatch(recoveryPanel()!.textContent || "", /eTag|server-triage/);
+    assert.equal(hasButton("Reload saved data"), false);
+    if (remoteStatus === "Created") {
+      assert.equal(field("Task owner").value, "Server Owner");
+      assert.equal(field("Task owner Microsoft 365 email").value, "server-owner@example.com");
+      assert.equal(field("Follow up (Quality Team notes)").value, "Server assessment");
+      assert.equal(button("Save changes").disabled, true);
+      change("Follow up (Quality Team notes)", "Fresh B draft");
+      assert.deepEqual(recoveredCopies(), [triageCopy]);
+    } else {
+      assert.match(container.textContent || "", /Closed · read-only/);
+      assert.match(container.textContent || "", /Server Owner/);
+      assert.equal(container.querySelector("textarea,input,select"), null);
+    }
+    await click("Back to register"); await click("Issue register"); await openIssue(1001);
+    assert.deepEqual(recoveredCopies(), [earlierArchive]);
+    assert.equal(progressInput().disabled, false);
+    assert.equal(progressInput().value, "");
+    assert.equal(stored[0].progressLog.length, 2);
+    assert.deepEqual(updateIds, [1]);
+    assert.deepEqual(appendIds, [1, 1]);
+    assert.equal(loads, 2);
+  });
+}
+
+for (const action of ["Create issue", "Reject (no action)"]) {
+  for (const readbackFails of [false, true]) {
+    test(`triage ${action} ${readbackFails ? "accepted without readback" : "accepted"} consumes only submitted fields`, async () => {
+      let stored = issue({ triaged: false, status: undefined, taskCreated: "No", transformedInto: undefined });
+      const patches: Partial<IIssue>[] = [];
+      await renderApp({
+        updateIssue: async (_id: number, patch: Partial<IIssue>) => {
+          patches.push(patch);
+          stored = { ...stored, ...patch, eTag: '"2"' };
+          if (readbackFails) throw new IssueRefreshError(stored.id);
+          return stored;
+        },
+        getIssue: async () => stored,
+        addProgressLogEntry: async (_id: number, entry: IProgressLogEntry) => ({ ...entry, id: 91, saveWarning: "Your update was posted. Reload its server details." }),
+      }, [stored]);
+      await click("Triage queue1"); await openIssue();
+      change("Transform into", "NC Major");
+      change("Task owner (gets reminders)", "Submitted Owner");
+      change("Task owner Microsoft 365 email", "submitted-owner@example.com");
+      change("Follow up note (optional)", "Submitted decision");
+      await click(action);
+      if (readbackFails) {
+        assertSavedWarning();
+        assert.equal(button(action).disabled, true);
+        await click("Reload latest and return to queue");
+      }
+      await click("Issue register"); await openIssue();
+      const expected = action === "Create issue" ? [] : [{
+        "Transformed into": "NC Major", "Task owner": "Submitted Owner", "Task owner Microsoft 365 email": "submitted-owner@example.com",
+      }];
+      assert.deepEqual(recoveredCopies(), expected);
+      assert.equal(field("Follow up (Quality Team notes)").value, "Submitted decision");
+      assert.equal(patches.length, 1);
+      if (action === "Reject (no action)") assert.equal(patches[0].taskOwner, undefined);
+      writeProgress("Accepted independent observation"); await click("Add update");
+      writeProgress("Unsubmitted independent observation");
+      stored = { ...stored, status: "Closed", eTag: '"3"' };
+      await click("Reload saved issue");
+      assert.deepEqual(recoveredCopies(), [...expected, { "Unposted progress note": "Unsubmitted independent observation" }]);
+      assert.doesNotMatch(recoveryPanel()?.textContent || "", /Submitted decision/);
+      assert.equal(patches.length, 1);
+    });
+  }
+}
+
+for (const readbackFails of [false, true]) {
+  for (const remountPending of [false, true]) {
+    test(`owner hold ${readbackFails ? "with failed readback" : "with readback"} retains unsent dates ${remountPending ? "across a pending remount" : "in the editor"}`, async () => {
+      let stored = issue({ status: "Created" });
+      const pending = deferred<void>();
+      const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+      let reads = 0;
+      await renderApp({
+        updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+          writes.push({ patch, eTag });
+          if (writes.length === 1) await pending.promise;
+          stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+          if (readbackFails && writes.length === 1) throw new IssueRefreshError(stored.id);
+          return stored;
+        },
+        getIssue: async () => {
+          reads += 1;
+          if (readbackFails && reads === 1) throw new Error("Readback still unavailable");
+          return stored;
+        },
+      }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+      await click("Issue register"); await openIssue();
+      const date = addCalendarDays(todayDate(), -3);
+      change("Status", "In Progress");
+      change("Implementation date", date);
+      await click("Put on hold");
+      change("Reason for hold *", "Waiting for parts");
+      change("Resume work on *", addCalendarDays(todayDate(), 7));
+      const confirms = Array.from(container.querySelectorAll("button")).filter(candidate => candidate.textContent === "Put on hold");
+      await act(async () => { Simulate.click(confirms[confirms.length - 1]); });
+      assertFieldsDisabled(true);
+      assert.equal(writes[0].patch.implementationDate, undefined);
+      assert.equal(writes[0].patch.status, "On Hold");
+      if (remountPending) {
+        await click("Back to my tasks"); await openIssue();
+        assertFieldsDisabled(true);
+        assert.equal(field("Implementation date").value, date);
+      }
+      await act(async () => { pending.resolve(); });
+      assert.equal(field("Implementation date").value, date);
+      assert.equal(field("Status").value, "On Hold");
+      assert.equal(button("Save progress").disabled, readbackFails);
+      if (hasButton("Cancel")) await click("Cancel");
+      await click("Back to my tasks"); await openIssue();
+      assert.equal(field("Implementation date").value, date);
+      assert.equal(button("Save progress").disabled, readbackFails);
+      if (readbackFails) {
+        await click("Reload latest and keep draft");
+        assert.equal(field("Implementation date").value, date);
+        assert.equal(button("Save progress").disabled, true);
+        await click("Reload latest and keep draft");
+        assert.equal(field("Implementation date").value, date);
+        assert.equal(button("Save progress").disabled, false);
+      }
+      assert.equal(stored.implementationDate, "");
+      assert.equal(recoveryPanel(), null);
+      const nextDate = addCalendarDays(todayDate(), -1);
+      change("Implementation date", nextDate);
+      assert.equal(field("Status").value, "On Hold");
+      assert.equal(writes.length, 1);
+      await click("Save progress");
+      assert.equal(writes.length, 2);
+      assert.equal(writes[1].eTag, '"2"');
+      assert.deepEqual(writes[1].patch, { implementationDate: nextDate });
+      assert.equal(stored.status, "On Hold");
+      assert.equal(field("Implementation date").value, nextDate);
+      assert.equal(button("Save progress").disabled, true);
+      assert.equal(recoveryPanel(), null);
+      assert.equal(reads, readbackFails ? 2 : 0);
+    });
+  }
+}
+
+async function requestOwnerHold(): Promise<void> {
+  await click("Put on hold");
+  change("Reason for hold *", "Waiting for parts");
+  change("Resume work on *", addCalendarDays(todayDate(), 7));
+  const confirms = Array.from(container.querySelectorAll("button")).filter(candidate => candidate.textContent === "Put on hold");
+  const confirm = confirms[confirms.length - 1];
+  assert.equal(confirm.disabled, false);
+  await act(async () => { Simulate.click(confirm); });
+}
+
+for (const readbackFails of [false, true]) {
+  test(`owner ${readbackFails ? "recovery" : "successful readback"} uses the fresh baseline when clearing a retained dirty date`, async () => {
+    let stored = issue({ status: "Created" });
+    const remoteDate = addCalendarDays(todayDate(), -10);
+    const draftDate = addCalendarDays(todayDate(), -3);
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    const remoteUpdate = () => { stored = { ...stored, implementationDate: remoteDate, eTag: '"remote-3"' }; };
+    let reads = 0;
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        stored = { ...stored, ...patch, eTag: '"2"' };
+        if (writes.length === 1) {
+          if (readbackFails) throw new IssueRefreshError(stored.id);
+          remoteUpdate();
+        }
+        return stored;
+      },
+      getIssue: async () => { reads += 1; return stored; },
+    }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+    await click("Issue register"); await openIssue();
+    change("Implementation date", draftDate);
+    await requestOwnerHold();
+    assert.equal(field("Implementation date").value, draftDate);
+    if (readbackFails) {
+      assert.equal(button("Save progress").disabled, true);
+      await click("Cancel");
+      remoteUpdate();
+      await click("Reload latest and keep draft");
+    }
+    assert.equal(field("Implementation date").value, draftDate);
+    assert.equal(field("Status").value, "On Hold");
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(stored.implementationDate, remoteDate);
+    await click("Back to my tasks"); await openIssue();
+    change("Implementation date", "");
+    assert.equal(field("Implementation date").value, "");
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Save progress");
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1].eTag, '"remote-3"');
+    assert.deepEqual(writes[1].patch, { implementationDate: "" });
+    assert.equal(stored.status, "On Hold");
+    assert.equal(stored.implementationDate, "");
+    assert.equal(button("Save progress").disabled, true);
+    assert.equal(recoveryPanel(), null);
+    assert.equal(reads, readbackFails ? 1 : 0);
+  });
+}
+
+test("owner recovery adopts an untouched server date before starting effectiveness testing", async () => {
+  let stored = issue({ status: "Created" });
+  const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+  let reads = 0;
+  await renderApp({
+    updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      stored = { ...stored, ...patch, eTag: '"2"' };
+      if (writes.length === 1) throw new IssueRefreshError(stored.id);
+      return stored;
+    },
+    getIssue: async () => { reads += 1; return stored; },
+  }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+  await click("Issue register"); await openIssue();
+  change("Status", "In Progress");
+  await requestOwnerHold();
+  assert.equal(field("Status").value, "On Hold");
+  assert.equal(button("Save progress").disabled, true);
+  assert.equal(hasButton("Reload latest and keep draft"), false);
+  await click("Cancel");
+  change("Status", "In Progress");
+  const remoteDate = addCalendarDays(todayDate(), -10);
+  stored = { ...stored, implementationDate: remoteDate, eTag: '"remote-3"' };
+  await click("Reload latest and keep draft");
+  assert.equal(field("Status").value, "In Progress");
+  assert.equal(field("Implementation date").value, remoteDate);
+  assert.equal(button("Save progress").disabled, false);
+  await click("Back to my tasks"); await openIssue();
+  assert.equal(field("Implementation date").value, remoteDate);
+  assert.equal(writes.length, 1);
+  await click("Mitigation implemented — start 2-month test");
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].eTag, '"remote-3"');
+  assert.equal(writes[1].patch.status, "Under Testing/Revision");
+  assert.equal(writes[1].patch.implementationDate, remoteDate);
+  assert.equal(stored.implementationDate, remoteDate);
+  assert.equal(stored.status, "Under Testing/Revision");
+  assert.equal(reads, 1);
+  assert.equal(recoveryPanel(), null);
+});
+
+for (const readbackFails of [false, true]) {
+  test(`owner ${readbackFails ? "provisional" : "full"} acceptance preserves a later delivered draft edit`, async () => {
+    let stored = issue({ status: "Created" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        if (writes.length === 1) await pending.promise;
+        stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+        if (readbackFails && writes.length === 1) throw new IssueRefreshError(stored.id);
+        return stored;
+      },
+      getIssue: async () => stored,
+    }, [stored], { profile: "owner", userDisplayName: "Owner", userEmail: "owner@example.com" });
+    await click("Issue register"); await openIssue();
+    const submittedDate = addCalendarDays(todayDate(), -3);
+    const newerDate = addCalendarDays(todayDate(), -1);
+    change("Implementation date", submittedDate);
+    await click("Save progress");
+    assert.equal(field("Implementation date").disabled, true);
+    act(() => { Simulate.change(field("Implementation date"), { target: { value: newerDate } } as never); });
+    await act(async () => { pending.resolve(); });
+    assert.equal(field("Implementation date").value, newerDate);
+    assert.equal(stored.implementationDate, submittedDate);
+    await click("Back to my tasks"); await openIssue();
+    if (readbackFails) await click("Reload latest and keep draft");
+    assert.equal(field("Implementation date").value, newerDate);
+    assert.equal(button("Save progress").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Save progress");
+    assert.equal(writes[1].eTag, '"2"');
+    assert.deepEqual(writes.map(write => write.patch), [{ implementationDate: submittedDate }, { implementationDate: newerDate }]);
+    assert.equal(stored.implementationDate, newerDate);
+    assert.equal(button("Save progress").disabled, true);
+  });
+}
+
+for (const operation of ["create", "progress"] as const) {
+  test(`legacy ${operation} receipt success wording cannot return on recovery or remount`, async () => {
+    const userEmail = `legacy-receipt-${operation}@example.com`;
+    const key = `qstar-accepted:${JSON.stringify([{}, userEmail])}`;
+    const receipt = { message: "Your submission was saved, but its receipt could not be read.", submitted: "Unconfirmed submission", issueId: 1, entryId: 72, qsNumber: 1001 };
+    window.sessionStorage.setItem(key, JSON.stringify({ [operation === "create" ? "create" : "progress:1"]: receipt }));
+    let failReload = false;
+    let writes = 0;
+    const services = {
+      loadIssues: async () => { if (failReload) throw new Error("Unavailable"); return [issue()]; },
+      createIssue: async () => { writes += 1; throw new Error("No retry allowed"); },
+      addProgressLogEntry: async () => { writes += 1; throw new Error("No retry allowed"); },
+    };
+    const open = async () => {
+      if (operation === "create") await click("Report");
+      else { await click("Issue register"); await openIssue(); }
+    };
+    const check = () => {
+      const notices = Array.from(container.querySelectorAll('[role="status"]'));
+      assert.equal(notices.length, 2);
+      for (const notice of notices) {
+        assert.match(notice.textContent || "", /submission may have been saved/);
+        assert.match(notice.textContent || "", /check the register or progress log before resubmitting/);
+      }
+      assert.match(container.textContent || "", /Unconfirmed submission/);
+      assert.doesNotMatch(container.textContent || "", /submission was saved/);
+      assert.equal(button(operation === "create" ? "Submit report" : "Add update").disabled, true);
+    };
+    await renderApp(services, [], { userEmail }); await open(); check();
+    act(() => { ReactDOM.unmountComponentAtNode(container); });
+    await renderApp(services, [], { userEmail }); await open(); check();
+    failReload = true; await click("Reload saved data"); check();
+    failReload = false; await click("Reload saved data");
+    assert.equal(hasButton("Reload saved data"), false);
+    assert.equal(window.sessionStorage.getItem(key), null);
+    assert.equal(operation === "create" ? field("Short summary *").disabled : progressInput().disabled, false);
+    assert.equal(writes, 0);
+  });
+}
+
+for (const outcome of ["rejected", "accepted", "accepted without readback"]) {
+  test(`QM detail ${outcome} across navigation retains the dispatched baseline and matching drafts`, async () => {
+    const original = issue({ transformedInto: "OFI", followUp: "Saved baseline" });
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    await renderApp({ updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+      writes.push({ patch, eTag });
+      if (writes.length === 1) {
+        await pending.promise;
+        if (outcome === "accepted without readback") throw new IssueRefreshError(1);
+      }
+      return { ...original, ...patch, eTag: '"2"' };
+    } }, [original]);
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Draft A");
+    change("Due date", "2026-12-01");
+    writeProgress("Omitted independent note");
+    await click("Save changes"); await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Draft A");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Omitted independent note");
+    assertFieldsDisabled(true);
+    await act(async () => { if (outcome === "rejected") pending.reject(new Error("Rejected after navigation")); else pending.resolve(); });
+    assert.equal(writes.length, 1);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Draft A");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Omitted independent note");
+    if (outcome === "rejected") {
+      change("Escalation BU", "IT");
+      await click("Save changes");
+      assert.deepEqual(writes[1], { patch: { followUp: "Draft A", dueDate: "2026-12-01", ownerBU: "IT" }, eTag: original.eTag });
+    } else {
+      assert.equal(button("Save changes").disabled, true);
+      if (outcome === "accepted without readback") assert.ok(button("Reload latest and discard draft"));
+    }
+  });
+}
+
+for (const profile of ["qm", "owner"]) for (const outcome of ["rejected", "accepted", "quarantined"]) {
+  test(`${profile} progress ${outcome} remains visible or is consumed across a pending remount without retry`, async () => {
+    const pending = deferred<IProgressLogEntry>();
+    let calls = 0;
+    await renderApp({ addProgressLogEntry: async () => { calls++; return pending.promise; } }, [issue()], { profile, userDisplayName: "Owner", userEmail: `owner@example.com` });
+    await click("Issue register"); await openIssue();
+    writeProgress("Dispatched observation"); await click("Add update");
+    await click(profile === "owner" ? "Back to my tasks" : "Back to register"); await openIssue();
+    assert.equal(progressInput().value, "Dispatched observation");
+    assert.equal(progressInput().disabled, true);
+    await act(async () => {
+      if (outcome === "rejected") pending.reject(new Error("Append rejected after navigation"));
+      else if (outcome === "quarantined") pending.reject(new AcceptedWriteError("progress", { issueId: 1 }));
+      else pending.resolve({ id: 41, text: "Dispatched observation", author: "Owner", ts: new Date().toISOString() });
+    });
+    assert.equal(calls, 1);
+    assert.equal(progressInput().value, outcome === "rejected" ? "Dispatched observation" : "");
+    if (outcome === "rejected") {
+      writeProgress(`${progressInput().value} with more detail`);
+      assert.equal(progressInput().value, "Dispatched observation with more detail");
+    } else if (outcome === "quarantined") {
+      assert.equal(progressInput().disabled, true);
+      await click("Reload saved data");
+    } else assert.deepEqual(journalText(), ["Dispatched observation"]);
+  });
+}
+
+for (const outcome of ["accepted", "accepted without readback"]) {
+  test(`${outcome} consumes matching QM fields but preserves a newer controlled field after remount`, async () => {
+    const pending = deferred<IIssue>();
+    await renderApp({ updateIssue: () => pending.promise });
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Dispatched value");
+    change("Due date", "2026-12-01");
+    await click("Save changes"); await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").disabled, true);
+    act(() => { Simulate.change(field("Follow up (Quality Team notes)"), { target: { value: "Newer controlled value" } } as never); });
+    await act(async () => {
+      if (outcome === "accepted without readback") pending.reject(new IssueRefreshError(1));
+      else pending.resolve(issue({ followUp: "Dispatched value", dueDate: "2026-12-01", eTag: '"2"' }));
+    });
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer controlled value");
+    assert.equal(field("Due date").value, "2026-12-01");
+    await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer controlled value");
+  });
+}
+
+for (const profile of ["qm", "owner"]) test(`${profile} accepted append preserves a newer controlled note after remount`, async () => {
+  const pending = deferred<IProgressLogEntry>();
+  await renderApp({ addProgressLogEntry: () => pending.promise }, [issue()], { profile, userDisplayName: "Owner", userEmail: "owner@example.com" });
+  await click("Issue register"); await openIssue(); writeProgress("Dispatched"); await click("Add update");
+  await click(profile === "owner" ? "Back to my tasks" : "Back to register"); await openIssue();
+  assert.equal(progressInput().disabled, true);
+  act(() => { Simulate.change(progressInput(), { target: { value: "Newer observation" } } as never); });
+  await act(async () => { pending.resolve({ id: 42, text: "Dispatched", author: "Owner", ts: new Date().toISOString() }); });
+  assert.equal(progressInput().value, "Newer observation");
+  assert.deepEqual(journalText(), ["Dispatched"]);
+});
+
+for (const remountPending of [false, true]) {
+  test(`QM accepted readback failure reload keeps a newer draft ${remountPending ? "after pending remount" : "in place"}`, async () => {
+    let stored = issue();
+    const pending = deferred<void>();
+    const writes: { patch: Partial<IIssue>; eTag: string }[] = [];
+    let reads = 0;
+    await renderApp({
+      updateIssue: async (_id: number, patch: Partial<IIssue>, eTag: string) => {
+        writes.push({ patch, eTag });
+        if (writes.length === 1) await pending.promise;
+        stored = { ...stored, ...patch, eTag: `"${writes.length + 1}"` };
+        if (writes.length === 1) throw new IssueRefreshError(stored.id);
+        return stored;
+      },
+      getIssue: async () => {
+        reads += 1;
+        if (reads === 1) throw new Error("Saved issue is still unavailable");
+        return stored;
+      },
+    }, [stored]);
+    await click("Issue register"); await openIssue();
+    change("Follow up (Quality Team notes)", "Accepted assessment");
+    change("Due date", "2026-12-01");
+    writeProgress("Independent unposted observation");
+    await click("Save changes");
+    if (remountPending) { await click("Back to register"); await openIssue(); }
+    assert.equal(field("Follow up (Quality Team notes)").disabled, true);
+    // A change delivered after dispatch must survive acceptance of the earlier value.
+    act(() => { Simulate.change(field("Follow up (Quality Team notes)"), { target: { value: "Newer assessment" } } as never); });
+    await act(async () => { pending.resolve(); });
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].eTag, '"1"');
+    assert.equal(stored.followUp, "Accepted assessment");
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    assert.equal(hasButton("Reload latest and discard draft"), false);
+    await click("Reload latest and keep draft");
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(button("Add update").disabled, true);
+    assert.equal(writes.length, 1);
+
+    stored = { ...stored, rootCause: "Fresh server analysis", eTag: '"remote-3"' };
+    await click("Reload latest and keep draft");
+    assert.equal(reads, 2);
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    assert.equal(field("Root cause").value, "Fresh server analysis");
+    assert.equal(field("Due date").value, "2026-12-01");
+    assert.equal(progressInput().value, "Independent unposted observation");
+    assert.equal(button("Save changes").disabled, false);
+    assert.equal(button("Add update").disabled, false);
+    assert.equal(writes.length, 1);
+    await click("Back to register"); await openIssue();
+    assert.equal(field("Follow up (Quality Team notes)").value, "Newer assessment");
+    await click("Save changes");
+    assert.deepEqual(writes[1], { patch: { followUp: "Newer assessment" }, eTag: '"remote-3"' });
+    assert.equal(stored.rootCause, "Fresh server analysis");
+    assert.equal(button("Save changes").disabled, true);
+    assert.equal(progressInput().value, "Independent unposted observation");
+    assert.equal(recoveryPanel(), null);
+  });
+}

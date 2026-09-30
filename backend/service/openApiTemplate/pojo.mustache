@@ -43,8 +43,14 @@ public class {{classname}} {{#parent}}extends {{{parent}}}{{/parent}}{{^parent}}
   {{/gson}}
   {{#isContainer}}
   {{#openApiNullable}}
+  {{#isNullable}}
+  @Builder.Default
+  private {{>nullableDataType}} {{name}} = JsonNullable.undefined();
+  {{/isNullable}}
+  {{^isNullable}}
   {{#defaultValue}}@Builder.Default{{/defaultValue}}
   private {{>nullableDataType}} {{name}} {{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/isNullable}}
   {{/openApiNullable}}
   {{^openApiNullable}}
   {{#defaultValue}}@Builder.Default{{/defaultValue}}
@@ -53,8 +59,14 @@ public class {{classname}} {{#parent}}extends {{{parent}}}{{/parent}}{{^parent}}
   {{/isContainer}}
   {{^isContainer}}
   {{#openApiNullable}}
+  {{#isNullable}}
+  @Builder.Default
+  private {{>nullableDataType}} {{name}} = JsonNullable.undefined();
+  {{/isNullable}}
+  {{^isNullable}}
   {{#defaultValue}}@Builder.Default{{/defaultValue}}
   private {{>nullableDataType}} {{name}}{{#defaultValue}} = {{{.}}}{{/defaultValue}};
+  {{/isNullable}}
   {{/openApiNullable}}
   {{^openApiNullable}}
   {{#defaultValue}}@Builder.Default{{/defaultValue}}

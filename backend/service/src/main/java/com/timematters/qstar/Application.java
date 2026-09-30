@@ -5,6 +5,8 @@ import org.springframework.boot.ExitCodeGenerator;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
+import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.context.annotation.ComponentScan;
 
 // NOTE: the template's Application.java shipped with a second, inner
@@ -16,7 +18,8 @@ import org.springframework.context.annotation.ComponentScan;
 // @ComponentScan of "com.timematters.qstar" already picks up as a subpackage).
 // Removed rather than fixed in place, since keeping two competing security
 // configs around is worse than one correct one.
-@SpringBootApplication
+// Q-Star stores its data in SharePoint. Keep the database template as unwired scaffolding.
+@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class, FlywayAutoConfiguration.class})
 @ComponentScan(
         basePackages = {
             "com.timematters.qstar",

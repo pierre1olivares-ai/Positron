@@ -1,154 +1,259 @@
 package com.timematters.qstar.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.api.model.IssueATO;
 import com.timematters.qstar.api.model.IssueCreateATO;
+import com.timematters.qstar.api.model.IssueHistoryATO;
 import com.timematters.qstar.api.model.IssuePatchATO;
+import com.timematters.qstar.api.model.ProgressCreateATO;
 import com.timematters.qstar.api.model.ProgressLogEntryATO;
-import com.timematters.qstar.infrastructure.sharepoint.IssueFields;
+import com.timematters.qstar.configuration.security.CallerContext;
+import com.timematters.qstar.configuration.security.CurrentUserProvider;
 import com.timematters.qstar.infrastructure.sharepoint.IssueRepository;
+import com.timematters.qstar.infrastructure.sharepoint.SharePointUser;
 import com.timematters.qstar.model.Issue;
-import com.timematters.qstar.model.ProgressLogEntry;
 import com.timematters.qstar.model.mapper.IssueMapper;
 import com.timematters.qstar.model.mapper.ProgressLogEntryMapper;
+import java.time.Clock;
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Autowired;
+import java.util.Objects;
+import java.util.Set;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 
-/**
- * Business logic for issues. Mirrors the intake/triage rules documented in
- * backend/sharepoint/qstar-sharepoint-graph-integration.md and implemented client-side in the
- * prototype (frontend/prototype/qstar-issue-manager.jsx) — this is a starting slice (intake
- * defaults + due-date SLA) rather than a full port of every rule (hold reminders, owner-update
- * flagging notifications, etc. still need to move here as the API is adopted).
- */
 @Service
 public class IssueService {
+    private static final Map<String, Integer> DUE_DAYS =
+            Map.of("Critical", 7, "High", 14, "Medium", 30, "Low", 60);
+    private static final Set<String> OWNER_FIELDS =
+            Set.of("status", "implementationDate", "holdReason", "holdUntil");
+    private static final Set<String> OWNER_STATUS =
+            Set.of("Created", "In Progress", "On Hold", IssueLifecycle.TEST);
+    private final IssueRepository repository;
+    private final CurrentUserProvider users;
+    private final ObjectMapper json;
+    private final Clock clock;
+    private final IssueMapper issues = new IssueMapper();
+    private final ProgressLogEntryMapper progress = new ProgressLogEntryMapper();
 
-    private static final Map<String, Integer> SEVERITY_DUE_DAYS =
-            Map.of(
-                    "Critical", 7,
-                    "High", 14,
-                    "Medium", 30,
-                    "Low", 60);
-
-    private final IssueRepository issueRepository;
-    private final IssueMapper issueMapper = new IssueMapper();
-    private final ProgressLogEntryMapper progressLogEntryMapper = new ProgressLogEntryMapper();
-
-    @Autowired
-    public IssueService(IssueRepository issueRepository) {
-        this.issueRepository = issueRepository;
+    public IssueService(
+            IssueRepository repository, CurrentUserProvider users, ObjectMapper json, Clock clock) {
+        this.repository = repository;
+        this.users = users;
+        this.json = json;
+        this.clock = clock;
     }
 
     public List<IssueATO> getAllIssues() {
-        return issueRepository.findAll().stream().map(issueMapper::toATO).collect(Collectors.toList());
+        users.currentUser();
+        return repository.findAll().stream().map(issues::toATO).toList();
+    }
+
+    public IssueATO getIssue(long id) {
+        users.currentUser();
+        return issues.toATO(repository.findById(id));
     }
 
     public IssueATO createIssue(IssueCreateATO create) {
-        Issue issue = new Issue();
-        issue.setShortSummary(create.getShortSummary());
-        issue.setDescription(create.getDescription());
-        issue.setImmediateAction(create.getImmediateAction());
-        issue.setSeverity(create.getSeverity());
-        issue.setCreatedBy(create.getCreatedBy());
-        String reportDate = create.getReportDate() != null ? create.getReportDate() : LocalDate.now().toString();
-        issue.setReportDate(reportDate);
-        issue.setDepartmentBU(create.getDepartmentBU());
-        issue.setRegion(create.getRegion());
-        issue.setAlreadyInContact(create.getAlreadyInContact());
-        issue.setDeviationType(create.getDeviationType());
-        issue.setIssueOrigin(create.getIssueOrigin());
-        issue.setAdditionalComments(create.getAdditionalComments());
-
-        // Intake defaults — untriaged, no task yet, no due date until the QM triages it.
-        issue.setTriaged(false);
-        issue.setTaskCreated("No");
-        issue.setQsNumber(nextQsNumber());
-
-        Issue created = issueRepository.create(issue);
-        return issueMapper.toATO(created);
+        CallerContext caller = users.currentUser();
+        manager(caller);
+        Map<String, Object> input = json.convertValue(create, new TypeReference<>() {});
+        input.entrySet().removeIf(entry -> entry.getValue() == null);
+        requireText(input, "shortSummary");
+        requireText(input, "description");
+        if (!DUE_DAYS.containsKey(text(input.get("severity")))) invalid("Choose a valid severity.");
+        input.put(
+                "reportDate",
+                input.containsKey("reportDate")
+                        ? inputDate(input.get("reportDate"), "reportDate")
+                        : LocalDate.now(clock).toString());
+        requireText(input, "reportDate");
+        input.put("triaged", false);
+        input.put("taskCreated", "No");
+        input.put("reminderCycle", "initial");
+        input.putIfAbsent("alreadyInContact", "No");
+        if (!input.containsKey("createdById") && !input.containsKey("createdByEmail")) {
+            input.put("createdBy", caller.displayName());
+            input.put("createdById", caller.sharePointUserId());
+            input.put("createdByEmail", caller.email());
+        }
+        return issues.toATO(repository.create(input));
     }
 
-    public IssueATO updateIssue(Long id, IssuePatchATO patch) {
-        Map<String, Object> fields = new HashMap<>();
-        putIfNotNull(fields, IssueFields.TRIAGED, patch.getTriaged());
-        putIfNotNull(fields, IssueFields.STATUS, patch.getStatus());
-        putIfNotNull(fields, IssueFields.TASK_CREATED, patch.getTaskCreated());
-        putIfNotNull(fields, IssueFields.TRANSFORMED_INTO, patch.getTransformedInto());
-        putIfNotNull(fields, IssueFields.FOLLOW_UP, patch.getFollowUp());
-        putIfNotNull(fields, IssueFields.TASK_OWNER, patch.getTaskOwner());
-        putIfNotNull(fields, IssueFields.OWNER_BU, patch.getOwnerBU());
-        putIfNotNull(fields, IssueFields.DUE_DATE, patch.getDueDate());
-        putIfNotNull(fields, IssueFields.ROOT_CAUSE, patch.getRootCause());
-        putIfNotNull(fields, IssueFields.CORRECTIVE_ACTION, patch.getCorrectiveAction());
-        putIfNotNull(fields, IssueFields.IMPLEMENTATION_DATE, patch.getImplementationDate());
-        putIfNotNull(fields, IssueFields.EFFECTIVENESS_CHECK, patch.getEffectivenessCheck());
-        putIfNotNull(fields, IssueFields.VERIFIED_BY, patch.getVerifiedBy());
-        putIfNotNull(fields, IssueFields.VERIFIED_DATE, patch.getVerifiedDate());
-        putIfNotNull(fields, IssueFields.CLOSED_DATE, patch.getClosedDate());
-        putIfNotNull(fields, IssueFields.CLOSED_AT, patch.getClosedAt());
-        putIfNotNull(fields, IssueFields.HOLD_REASON, patch.getHoldReason());
-        putIfNotNull(fields, IssueFields.HOLD_UNTIL, patch.getHoldUntil());
-        putIfNotNull(fields, IssueFields.OWNER_UPDATE_AT, patch.getOwnerUpdateAt());
-        putIfNotNull(fields, IssueFields.OWNER_UPDATE_TEXT, patch.getOwnerUpdateText());
-        if (patch.getOwnerUpdate() != null) {
-            fields.put(IssueFields.OWNER_UPDATE, patch.getOwnerUpdate() ? "Yes" : "No");
+    public Object updateIssue(long id, IssuePatchATO requested, String originalETag) {
+        if (originalETag == null || originalETag.isBlank() || originalETag.equals("*")) {
+            throw new IssueOperationException(
+                    428,
+                    "ISSUE_VERSION_REQUIRED",
+                    "Reload the issue and supply its original ETag before saving.");
         }
-
-        // Triage-time due-date default: severity SLA from the report date, unless the caller
-        // (QM override) already supplied one via the patch.
-        if (patch.getDueDate() == null && Boolean.TRUE.equals(patch.getTriaged())) {
-            issueRepository.findAll().stream()
-                    .filter(i -> id.equals(i.getId()))
-                    .findFirst()
-                    .ifPresent(
-                            existing -> {
-                                String defaultDueDate = defaultDueDateFor(existing);
-                                if (defaultDueDate != null) {
-                                    fields.put(IssueFields.DUE_DATE, defaultDueDate);
-                                }
-                            });
+        CallerContext caller = users.currentUser();
+        Issue current = repository.findById(id);
+        Map<String, Object> patch = json.convertValue(requested, new TypeReference<>() {});
+        // JsonNullable serializes only explicitly supplied properties, including explicit nulls.
+        authorizePatch(caller, current, patch);
+        if (!Objects.equals(current.getETag(), originalETag)) throw conflict(id, current);
+        validate(patch);
+        IssueLifecycle.apply(current, patch, clock);
+        if (Boolean.TRUE.equals(patch.get("triaged"))
+                && !Boolean.TRUE.equals(current.getTriaged())
+                && !patch.containsKey("dueDate")
+                && text(current.getDueDate()).isEmpty()) {
+            patch.put(
+                    "dueDate",
+                    LocalDate.parse(CalendarDates.normalize(current.getReportDate()))
+                            .plusDays(DUE_DAYS.getOrDefault(current.getSeverity(), 30))
+                            .toString());
         }
-
-        issueRepository.update(id, fields);
-        return issueMapper.toATO(
-                issueRepository.findAll().stream().filter(i -> id.equals(i.getId())).findFirst().orElseThrow());
+        if ("owner".equals(caller.role())
+                && patch.containsKey("status")
+                && !Objects.equals(current.getStatus(), patch.get("status"))) {
+            patch.put("ownerUpdate", true);
+            patch.put("ownerUpdateAt", clock.instant().toString());
+            patch.put(
+                    "ownerUpdateText",
+                    "Status changed from \""
+                            + current.getStatus()
+                            + "\" to \""
+                            + patch.get("status")
+                            + "\".");
+        }
+        if (patch.isEmpty()) return issues.toATO(current);
+        try {
+            repository.update(id, patch, originalETag);
+        } catch (HttpStatusCodeException e) {
+            if (e.getStatusCode().value() != 412) throw e;
+            Issue latest = null;
+            try {
+                latest = repository.findById(id);
+            } catch (Exception ignored) {
+            }
+            throw conflict(id, latest);
+        }
+        try {
+            return issues.toATO(repository.findById(id));
+        } catch (Exception e) {
+            return Map.of(
+                    "saved",
+                    true,
+                    "issueId",
+                    id,
+                    "saveWarning",
+                    "Your changes were saved. Reload this issue before editing again; do not repeat the save.");
+        }
     }
 
-    public ProgressLogEntryATO addProgressLogEntry(Long issueId, ProgressLogEntryATO entryATO) {
-        ProgressLogEntry entry = progressLogEntryMapper.fromATO(entryATO);
-        if (entry.getTs() == null) {
-            entry.setTs(OffsetDateTime.now().toString());
-        }
-        issueRepository.addProgressLogEntry(issueId, entry);
-        return progressLogEntryMapper.toATO(entry);
+    public ProgressLogEntryATO addProgressLogEntry(long id, ProgressCreateATO input) {
+        CallerContext caller = users.currentUser();
+        Issue issue = repository.findById(id);
+        contributor(caller, issue);
+        if ("Closed".equals(issue.getStatus()))
+            invalid("Closed issues cannot receive progress updates.");
+        String text = input.getText();
+        if (text == null || text.isBlank() || text.length() > 63000)
+            invalid("Enter a progress update of 1 to 63000 characters.");
+        return progress.toATO(
+                repository.append(
+                        id,
+                        text,
+                        new SharePointUser(
+                                caller.sharePointUserId(), caller.displayName(), caller.email())));
     }
 
-    private String defaultDueDateFor(Issue issue) {
-        Integer days = SEVERITY_DUE_DAYS.get(issue.getSeverity());
-        if (days == null || issue.getReportDate() == null) {
-            return null;
-        }
-        return LocalDate.parse(issue.getReportDate()).plusDays(days).toString();
+    public IssueHistoryATO getIssueHistory(long id) {
+        users.currentUser();
+        return json.convertValue(repository.history(id), IssueHistoryATO.class);
     }
 
-    private Integer nextQsNumber() {
-        return issueRepository.findAll().stream()
-                        .map(Issue::getQsNumber)
-                        .filter(java.util.Objects::nonNull)
-                        .max(Integer::compareTo)
-                        .orElse(1000)
-                + 1;
+    public ProgressLogEntryATO getProgressEntry(long id, long entryId) {
+        users.currentUser();
+        repository.findById(id);
+        return progress.toATO(repository.progressEntry(id, entryId));
     }
 
-    private void putIfNotNull(Map<String, Object> map, String key, Object value) {
-        if (value != null) {
-            map.put(key, value);
+    private void authorizePatch(CallerContext caller, Issue issue, Map<String, Object> patch) {
+        contributor(caller, issue);
+        if (!"owner".equals(caller.role())) return;
+        // Older beta clients send these derived fields; ignore them and derive trusted values
+        // below.
+        patch.remove("ownerUpdate");
+        patch.remove("ownerUpdateAt");
+        patch.remove("ownerUpdateText");
+        if (IssueLifecycle.TEST.equals(issue.getStatus()))
+            throw new AccessDeniedException(
+                    "Only the Quality Team can change an issue under effectiveness testing.");
+        if (!OWNER_FIELDS.containsAll(patch.keySet()))
+            throw new AccessDeniedException(
+                    "Task owners can update only their task progress, implementation date and hold details.");
+        if (patch.containsKey("status") && !OWNER_STATUS.contains(text(patch.get("status"))))
+            throw new AccessDeniedException(
+                    "Only the Quality Team can close, reject or reopen issues.");
+    }
+
+    private void contributor(CallerContext caller, Issue issue) {
+        if (caller.role().equals("admin") || caller.role().equals("qm")) return;
+        if (!caller.role().equals("owner")
+                || !Objects.equals(issue.getTaskOwnerId(), caller.sharePointUserId())
+                || "Closed".equals(issue.getStatus())) {
+            throw new AccessDeniedException(
+                    "Only the current task owner or the Quality Team can change this issue.");
         }
+    }
+
+    private void manager(CallerContext caller) {
+        if (!Set.of("admin", "qm").contains(caller.role()))
+            throw new AccessDeniedException("Only the Quality Team can create an issue.");
+    }
+
+    private IssueOperationException conflict(long id, Issue latest) {
+        var meta = new LinkedHashMap<String, Object>();
+        meta.put("issueId", id);
+        if (latest != null) meta.put("freshIssue", issues.toATO(latest));
+        return new IssueOperationException(
+                412,
+                "ISSUE_CONFLICT",
+                "This issue changed while you were editing. Keep your draft and reload explicitly.",
+                meta);
+    }
+
+    private void validate(Map<String, Object> patch) {
+        for (String name : CalendarDates.FIELDS)
+            if (patch.containsKey(name)) patch.put(name, inputDate(patch.get(name), name));
+        if (patch.containsKey("severity") && !DUE_DAYS.containsKey(text(patch.get("severity"))))
+            invalid("Choose a valid severity.");
+        for (String name : Set.of("taskCreated", "alreadyInContact"))
+            if (patch.containsKey(name) && !Set.of("Yes", "No").contains(text(patch.get(name))))
+                invalid("Choose Yes or No for " + name + ".");
+        for (String name : Set.of("triaged", "ownerUpdate"))
+            if (patch.containsKey(name) && !(patch.get(name) instanceof Boolean))
+                invalid(name + " must be true or false.");
+        for (String name : Set.of("shortSummary", "description"))
+            if (patch.containsKey(name)) requireText(patch, name);
+    }
+
+    private static void requireText(Map<String, Object> values, String name) {
+        if (text(values.get(name)).isBlank()) invalid(name + " is required.");
+    }
+
+    private static String inputDate(Object value, String field) {
+        try {
+            return CalendarDates.normalize(text(value));
+        } catch (java.time.DateTimeException invalidDate) {
+            throw new IssueOperationException(
+                    400, "INVALID_ISSUE", "Enter a valid calendar date for " + field + ".");
+        }
+    }
+
+    private static String text(Object value) {
+        return value == null ? "" : value.toString();
+    }
+
+    private static void invalid(String message) {
+        throw new IssueOperationException(400, "INVALID_ISSUE", message);
     }
 }

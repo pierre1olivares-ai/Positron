@@ -1,197 +1,385 @@
 package com.timematters.qstar.infrastructure.sharepoint;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.timematters.qstar.model.Issue;
 import com.timematters.qstar.model.ProgressLogEntry;
+import com.timematters.qstar.service.CalendarDates;
+import com.timematters.qstar.service.IssueOperationException;
+import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
+import java.util.Set;
 import org.springframework.stereotype.Repository;
 
-/**
- * Reads/writes Q-Star issues against the "Q-Star Issues" and "Q-Star Progress Log" SharePoint
- * lists via Microsoft Graph (app-only, Sites.Selected). See
- * backend/sharepoint/qstar-sharepoint-graph-integration.md for the full field/column design this
- * mirrors.
- */
 @Repository
 public class IssueRepository {
+    public static final Map<String, String> FIELDS =
+            Map.ofEntries(
+                    Map.entry("qsNumber", "QsNumber"), Map.entry("triaged", "Triaged"),
+                    Map.entry("status", "Status"), Map.entry("taskCreated", "TaskCreated"),
+                    Map.entry("transformedInto", "TransformedInto"),
+                            Map.entry("shortSummary", "ShortSummary"),
+                    Map.entry("description", "Description"),
+                            Map.entry("immediateAction", "ImmediateAction"),
+                    Map.entry("severity", "Severity"), Map.entry("reportDate", "ReportDate"),
+                    Map.entry("departmentBU", "DepartmentBU"), Map.entry("region", "Region"),
+                    Map.entry("alreadyInContact", "AlreadyInContact"),
+                            Map.entry("deviationType", "DeviationType"),
+                    Map.entry("issueOrigin", "Origin"),
+                            Map.entry("additionalComments", "AdditionalComments"),
+                    Map.entry("followUp", "FollowUp"), Map.entry("ownerBU", "EscalationBU"),
+                    Map.entry("dueDate", "DueDate"), Map.entry("rootCause", "RootCause"),
+                    Map.entry("correctiveAction", "CorrectiveAction"),
+                            Map.entry("implementationDate", "ImplementationDate"),
+                    Map.entry("effectivenessCheck", "EffectivenessCheck"),
+                            Map.entry("verifiedDate", "VerifiedDate"),
+                    Map.entry("closedDate", "ClosedDate"), Map.entry("closedAt", "ClosedAt"),
+                    Map.entry("holdReason", "HoldReason"), Map.entry("holdUntil", "HoldUntil"),
+                    Map.entry("ownerUpdate", "OwnerUpdate"),
+                            Map.entry("ownerUpdateAt", "OwnerUpdateAt"),
+                    Map.entry("ownerUpdateText", "OwnerUpdateText"),
+                            Map.entry("reminderCycle", "ReminderCycle"));
+    public static final Map<String, String> PEOPLE =
+            Map.of("createdBy", "ReportedBy", "taskOwner", "TaskOwner", "verifiedBy", "VerifiedBy");
+    private static final Set<String> BOOLS = Set.of("triaged", "ownerUpdate");
+    private static final Set<String> TIMESTAMPS = Set.of("closedAt", "ownerUpdateAt");
+    private static final String ISSUE_QUERY =
+            "$select=*,ReportedBy/Id,ReportedBy/Title,ReportedBy/EMail,ReportedBy/Name,TaskOwner/Id,TaskOwner/Title,TaskOwner/EMail,TaskOwner/Name,VerifiedBy/Id,VerifiedBy/Title,VerifiedBy/EMail,VerifiedBy/Name&$expand=ReportedBy,TaskOwner,VerifiedBy";
+    private static final String PROGRESS_QUERY =
+            "$select=Id,EntryText,Created,FileDirRef,FSObjType,Author/Id,Author/Title,Author/EMail,Author/Name&$expand=Author";
+    private final SharePointRestClient client;
+    private final SharePointProperties properties;
+    private final ObjectMapper json = new ObjectMapper();
 
-    @Value("${qstar.sharepoint.issues-list}")
-    private String issuesListName;
-
-    @Value("${qstar.sharepoint.progress-list}")
-    private String progressListName;
-
-    private final SharePointGraphClient graphClient;
-
-    @Autowired
-    public IssueRepository(SharePointGraphClient graphClient) {
-        this.graphClient = graphClient;
+    public IssueRepository(SharePointRestClient client, SharePointProperties properties) {
+        this.client = client;
+        this.properties = properties;
     }
 
     public List<Issue> findAll() {
-        String issuesListId = graphClient.getListId(issuesListName);
-        String progressListId = graphClient.getListId(progressListName);
-
-        List<Map<String, Object>> rawIssues = graphClient.getAllItems(issuesListId);
-        List<Map<String, Object>> rawProgress = graphClient.getAllItems(progressListId);
-
-        Map<String, List<ProgressLogEntry>> logsByParentId = new HashMap<>();
-        for (Map<String, Object> p : rawProgress) {
-            String parentId = stringOf(p.get(IssueFields.Progress.PARENT_ITEM_ID));
-            logsByParentId
-                    .computeIfAbsent(parentId, k -> new ArrayList<>())
-                    .add(
-                            new ProgressLogEntry(
-                                    stringOf(p.get(IssueFields.Progress.ENTRY_DATE)),
-                                    stringOf(p.get(IssueFields.Progress.AUTHOR)),
-                                    stringOf(p.get(IssueFields.Progress.TEXT))));
+        long offset = referenceOffset();
+        String root = progressRoot();
+        var logs = new LinkedHashMap<Long, List<ProgressLogEntry>>();
+        for (var row :
+                client.getItems(
+                        properties.getProgressListName(),
+                        PROGRESS_QUERY + "&$filter=FSObjType eq 0")) {
+            Long parent = parentId(root, row);
+            if (parent != null)
+                logs.computeIfAbsent(parent, ignored -> new ArrayList<>()).add(toProgress(row));
         }
-
-        return rawIssues.stream()
-                .map(fields -> toIssue(fields, logsByParentId.getOrDefault(stringOf(fields.get("Id")), List.of())))
-                .collect(Collectors.toList());
+        return client.getItems(properties.getIssuesListName(), ISSUE_QUERY).stream()
+                .map(
+                        row ->
+                                toIssue(
+                                        row,
+                                        offset,
+                                        logs.getOrDefault(number(row.get("Id")), List.of())))
+                .toList();
     }
 
-    public Issue create(Issue issue) {
-        String issuesListId = graphClient.getListId(issuesListName);
-        Map<String, Object> created = graphClient.createItem(issuesListId, toFields(issue));
-        return toIssue(created, List.of());
+    public Issue findById(long id) {
+        long offset = referenceOffset();
+        String folder = folder(id);
+        var row = client.getItem(properties.getIssuesListName(), id, ISSUE_QUERY);
+        var entries =
+                client
+                        .getItems(
+                                properties.getProgressListName(),
+                                PROGRESS_QUERY
+                                        + "&$filter=FSObjType eq 0 and FileDirRef eq '"
+                                        + SharePointRestClient.literal(folder)
+                                        + "'")
+                        .stream()
+                        .filter(entry -> folder.equals(entry.get("FileDirRef")))
+                        .map(this::toProgress)
+                        .toList();
+        return toIssue(row, offset, entries);
     }
 
-    public void update(Long id, Map<String, Object> patchFields) {
-        String issuesListId = graphClient.getListId(issuesListName);
-        graphClient.updateItemFields(issuesListId, id.toString(), patchFields);
+    public Map<String, Object> history(long id) {
+        String query =
+                "$select=Id,Created,Modified,OData__UIVersionString,Triaged,TaskCreated,Status";
+        var current = client.getItem(properties.getIssuesListName(), id, query);
+        var versions = client.getItemVersions(properties.getIssuesListName(), id);
+        var after = client.getItem(properties.getIssuesListName(), id, query);
+        var result = new LinkedHashMap<String, Object>();
+        result.put("issueId", id);
+        result.put("eTag", eTag(current));
+        result.put("current", current);
+        result.put("versions", versions);
+        result.put(
+                "complete",
+                eTag(current) != null && !eTag(current).equals("*") && current.equals(after));
+        return result;
     }
 
-    public void addProgressLogEntry(Long issueId, ProgressLogEntry entry) {
-        String progressListId = graphClient.getListId(progressListName);
-        Map<String, Object> fields = new HashMap<>();
-        fields.put(IssueFields.Progress.PARENT_ITEM_ID, issueId);
-        fields.put(IssueFields.Progress.AUTHOR, entry.getAuthor());
-        fields.put(IssueFields.Progress.ENTRY_DATE, entry.getTs());
-        fields.put(IssueFields.Progress.TEXT, entry.getText());
-        graphClient.createItem(progressListId, fields);
-    }
-
-    private Issue toIssue(Map<String, Object> f, List<ProgressLogEntry> progressLog) {
-        Issue issue = new Issue();
-        issue.setId(longOf(f.get("Id")));
-        issue.setQsNumber(intOf(f.get(IssueFields.QS_NUMBER)));
-        issue.setTriaged("Yes".equals(f.get(IssueFields.TRIAGED)));
-        issue.setStatus(stringOf(f.get(IssueFields.STATUS)));
-        issue.setTaskCreated((String) f.getOrDefault(IssueFields.TASK_CREATED, "No"));
-        issue.setTransformedInto(stringOf(f.get(IssueFields.TRANSFORMED_INTO)));
-
-        issue.setShortSummary(stringOf(f.get(IssueFields.SHORT_SUMMARY)));
-        issue.setDescription(stringOf(f.get(IssueFields.DESCRIPTION)));
-        issue.setImmediateAction(stringOf(f.get(IssueFields.IMMEDIATE_ACTION)));
-        issue.setSeverity(stringOf(f.get(IssueFields.SEVERITY)));
-        issue.setCreatedBy(stringOf(f.get(IssueFields.CREATED_BY)));
-        issue.setReportDate(stringOf(f.get(IssueFields.REPORT_DATE)));
-        issue.setDepartmentBU(stringOf(f.get(IssueFields.DEPARTMENT_BU)));
-        issue.setRegion(stringOf(f.get(IssueFields.REGION)));
-        issue.setAlreadyInContact((String) f.getOrDefault(IssueFields.ALREADY_IN_CONTACT, "No"));
-        issue.setDeviationType(stringOf(f.get(IssueFields.DEVIATION_TYPE)));
-        issue.setIssueOrigin(stringOf(f.get(IssueFields.ISSUE_ORIGIN)));
-        issue.setAdditionalComments(stringOf(f.get(IssueFields.ADDITIONAL_COMMENTS)));
-
-        issue.setFollowUp(stringOf(f.get(IssueFields.FOLLOW_UP)));
-        issue.setTaskOwner(stringOf(f.get(IssueFields.TASK_OWNER)));
-        String ownerBU = stringOf(f.get(IssueFields.OWNER_BU));
-        issue.setOwnerBU(ownerBU != null ? ownerBU : stringOf(f.get(IssueFields.DEPARTMENT_BU)));
-        issue.setDueDate(stringOf(f.get(IssueFields.DUE_DATE)));
-
-        issue.setRootCause(stringOf(f.get(IssueFields.ROOT_CAUSE)));
-        issue.setCorrectiveAction(stringOf(f.get(IssueFields.CORRECTIVE_ACTION)));
-        issue.setImplementationDate(stringOf(f.get(IssueFields.IMPLEMENTATION_DATE)));
-        issue.setEffectivenessCheck(stringOf(f.get(IssueFields.EFFECTIVENESS_CHECK)));
-        issue.setVerifiedBy(stringOf(f.get(IssueFields.VERIFIED_BY)));
-        issue.setVerifiedDate(stringOf(f.get(IssueFields.VERIFIED_DATE)));
-        issue.setClosedDate(stringOf(f.get(IssueFields.CLOSED_DATE)));
-        issue.setClosedAt(stringOf(f.get(IssueFields.CLOSED_AT)));
-
-        issue.setHoldReason(stringOf(f.get(IssueFields.HOLD_REASON)));
-        issue.setHoldUntil(stringOf(f.get(IssueFields.HOLD_UNTIL)));
-
-        issue.setOwnerUpdate("Yes".equals(f.get(IssueFields.OWNER_UPDATE)));
-        issue.setOwnerUpdateAt(stringOf(f.get(IssueFields.OWNER_UPDATE_AT)));
-        issue.setOwnerUpdateText(stringOf(f.get(IssueFields.OWNER_UPDATE_TEXT)));
-
-        issue.setProgressLog(progressLog);
-        return issue;
-    }
-
-    /** Converts every non-null field on {@code issue} to SharePoint internal field names. */
-    private Map<String, Object> toFields(Issue issue) {
-        Map<String, Object> fields = new HashMap<>();
-        putIfNotNull(fields, IssueFields.QS_NUMBER, issue.getQsNumber());
-        putIfNotNull(fields, IssueFields.TRIAGED, boolToYesNo(issue.getTriaged()));
-        putIfNotNull(fields, IssueFields.STATUS, issue.getStatus());
-        putIfNotNull(fields, IssueFields.TASK_CREATED, issue.getTaskCreated());
-        putIfNotNull(fields, IssueFields.TRANSFORMED_INTO, issue.getTransformedInto());
-
-        putIfNotNull(fields, IssueFields.SHORT_SUMMARY, issue.getShortSummary());
-        putIfNotNull(fields, IssueFields.DESCRIPTION, issue.getDescription());
-        putIfNotNull(fields, IssueFields.IMMEDIATE_ACTION, issue.getImmediateAction());
-        putIfNotNull(fields, IssueFields.SEVERITY, issue.getSeverity());
-        putIfNotNull(fields, IssueFields.CREATED_BY, issue.getCreatedBy());
-        putIfNotNull(fields, IssueFields.REPORT_DATE, issue.getReportDate());
-        putIfNotNull(fields, IssueFields.DEPARTMENT_BU, issue.getDepartmentBU());
-        putIfNotNull(fields, IssueFields.REGION, issue.getRegion());
-        putIfNotNull(fields, IssueFields.ALREADY_IN_CONTACT, issue.getAlreadyInContact());
-        putIfNotNull(fields, IssueFields.DEVIATION_TYPE, issue.getDeviationType());
-        putIfNotNull(fields, IssueFields.ISSUE_ORIGIN, issue.getIssueOrigin());
-        putIfNotNull(fields, IssueFields.ADDITIONAL_COMMENTS, issue.getAdditionalComments());
-
-        putIfNotNull(fields, IssueFields.FOLLOW_UP, issue.getFollowUp());
-        putIfNotNull(fields, IssueFields.TASK_OWNER, issue.getTaskOwner());
-        putIfNotNull(fields, IssueFields.OWNER_BU, issue.getOwnerBU());
-        putIfNotNull(fields, IssueFields.DUE_DATE, issue.getDueDate());
-
-        putIfNotNull(fields, IssueFields.ROOT_CAUSE, issue.getRootCause());
-        putIfNotNull(fields, IssueFields.CORRECTIVE_ACTION, issue.getCorrectiveAction());
-        putIfNotNull(fields, IssueFields.IMPLEMENTATION_DATE, issue.getImplementationDate());
-        putIfNotNull(fields, IssueFields.EFFECTIVENESS_CHECK, issue.getEffectivenessCheck());
-        putIfNotNull(fields, IssueFields.VERIFIED_BY, issue.getVerifiedBy());
-        putIfNotNull(fields, IssueFields.VERIFIED_DATE, issue.getVerifiedDate());
-        putIfNotNull(fields, IssueFields.CLOSED_DATE, issue.getClosedDate());
-        putIfNotNull(fields, IssueFields.CLOSED_AT, issue.getClosedAt());
-
-        putIfNotNull(fields, IssueFields.HOLD_REASON, issue.getHoldReason());
-        putIfNotNull(fields, IssueFields.HOLD_UNTIL, issue.getHoldUntil());
-
-        if (issue.getOwnerUpdate() != null) {
-            fields.put(IssueFields.OWNER_UPDATE, boolToYesNo(issue.getOwnerUpdate()));
+    public Issue create(Map<String, Object> input) {
+        long offset = referenceOffset();
+        var fields = toFields(input);
+        fields.remove("QsNumber");
+        Issue fallback = json.convertValue(input, Issue.class);
+        fallback.setProgressLog(List.of());
+        Map<String, Object> created;
+        try {
+            created = client.createItem(properties.getIssuesListName(), fields);
+        } catch (AcceptedWriteException accepted) {
+            fallback.setSaveWarning(accepted.getMessage());
+            return fallback;
         }
-        putIfNotNull(fields, IssueFields.OWNER_UPDATE_AT, issue.getOwnerUpdateAt());
-        putIfNotNull(fields, IssueFields.OWNER_UPDATE_TEXT, issue.getOwnerUpdateText());
+        Long id;
+        try {
+            id = created == null ? null : number(created.get("Id"));
+        } catch (RuntimeException malformedIdentity) {
+            id = null;
+        }
+        if (id == null || id <= 0) {
+            fallback.setSaveWarning(
+                    "The report was accepted. Reload before submitting again; its identity was unavailable.");
+            return fallback;
+        }
+        fallback.setId(id);
+        long reference;
+        try {
+            reference = reference(offset, id);
+        } catch (RuntimeException unsupportedReference) {
+            fallback.setSaveWarning(
+                    "The report was saved. Its reference exceeds the supported range; reload and contact an administrator. Do not submit it again.");
+            return fallback;
+        }
+        fallback.setQsNumber(reference);
+        fallback.setETag(null);
+        String warning = null;
+        try {
+            String version = eTag(created);
+            if (version == null)
+                version = eTag(client.getItem(properties.getIssuesListName(), id, "$select=Id"));
+            client.updateItem(
+                    properties.getIssuesListName(), id, Map.of("QsNumber", reference), version);
+        } catch (Exception e) {
+            warning =
+                    "The report was saved. Its reference is reserved; SharePoint synchronization is pending.";
+        }
+        try {
+            Issue saved = findById(id);
+            saved.setSaveWarning(warning);
+            return saved;
+        } catch (Exception e) {
+            fallback.setSaveWarning(
+                    "The report was saved. Reload its latest details; do not submit it again.");
+            return fallback;
+        }
+    }
+
+    public void update(long id, Map<String, Object> patch, String eTag) {
+        var fields = toFields(patch);
+        fields.remove("QsNumber");
+        client.updateItem(properties.getIssuesListName(), id, fields, eTag);
+    }
+
+    public ProgressLogEntry append(long issueId, String text, SharePointUser caller) {
+        String folder = folder(issueId);
+        try {
+            client.ensureFolder(folder);
+        } catch (org.springframework.web.client.HttpClientErrorException e) {
+            if (e.getStatusCode().value() != 403 && e.getStatusCode().value() != 404) throw e;
+            throw new IssueOperationException(
+                    409,
+                    "PROGRESS_ACCESS_PENDING",
+                    "Progress access is still being prepared. Keep your text and retry after the assignment flow completes.");
+        }
+        Long id;
+        try {
+            id = client.appendInFolder(properties.getProgressListName(), folder, text);
+        } catch (AcceptedWriteException accepted) {
+            id = null;
+        }
+        if (id != null) {
+            try {
+                return progressEntry(issueId, id);
+            } catch (Exception e) {
+                /* The append succeeded. Never repeat it because readback failed. */
+            }
+        }
+        var fallback = new ProgressLogEntry();
+        fallback.setId(id);
+        fallback.setText(text);
+        fallback.setAuthor(caller.displayName());
+        fallback.setAuthorId(caller.id());
+        fallback.setAuthorEmail(caller.email());
+        fallback.setTs("");
+        fallback.setSaveWarning(
+                id == null
+                        ? "Your update may have been posted. Reload the progress log and check before resubmitting."
+                        : "Your update was posted. Reload its SharePoint-recorded time and details; do not post it again.");
+        return fallback;
+    }
+
+    public ProgressLogEntry progressEntry(long issueId, long entryId) {
+        var row = client.getItem(properties.getProgressListName(), entryId, PROGRESS_QUERY);
+        if (!folder(issueId).equals(row.get("FileDirRef"))
+                || !Long.valueOf(0).equals(number(row.get("FSObjType")))) {
+            throw new IssueOperationException(
+                    404, "PROGRESS_NOT_FOUND", "This progress entry does not belong to the issue.");
+        }
+        return toProgress(row);
+    }
+
+    public long referenceOffset() {
+        var rows = client.getItems(properties.getConfigListName(), "$select=Id,ReferenceOffset");
+        if (rows.size() != 1)
+            throw new IllegalStateException(
+                    "Reference allocation requires exactly one provisioned Config item.");
+        Long value = number(rows.getFirst().get("ReferenceOffset"));
+        if (value == null || value < 1000 || value > 9007199254740991L) {
+            throw new IllegalStateException(
+                    "ReferenceOffset is invalid. Run the approved provisioner before intake.");
+        }
+        return value;
+    }
+
+    private long reference(long offset, long id) {
+        long value = Math.addExact(offset, id);
+        if (value > 9007199254740991L)
+            throw new IllegalStateException("Reference exceeds the supported integer range.");
+        return value;
+    }
+
+    private String progressRoot() {
+        return client.listInfo(properties.getProgressListName()).rootPath().replaceAll("/$", "");
+    }
+
+    private String folder(long id) {
+        if (id <= 0) throw new IllegalArgumentException("Invalid issue ID.");
+        return progressRoot() + "/issue-" + id;
+    }
+
+    private Long parentId(String root, Map<String, Object> entry) {
+        String path = text(entry.get("FileDirRef"));
+        String prefix = root + "/issue-";
+        if (!path.startsWith(prefix)) return null;
+        String suffix = path.substring(prefix.length());
+        if (!suffix.matches("[1-9][0-9]*")) return null;
+        try {
+            return Long.valueOf(suffix);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Issue toIssue(Map<String, Object> row, long offset, List<ProgressLogEntry> entries) {
+        var values = new LinkedHashMap<String, Object>();
+        for (var field : FIELDS.entrySet()) {
+            String name = field.getKey();
+            Object value = row.get(field.getValue());
+            if (BOOLS.contains(name)) value = "Yes".equals(value);
+            else if (CalendarDates.FIELDS.contains(name))
+                value = CalendarDates.normalize(text(value));
+            else if (!name.equals("qsNumber")) value = text(value);
+            values.put(name, value);
+        }
+        long id = number(row.get("Id"));
+        Long existing = number(row.get("QsNumber"));
+        values.put("id", id);
+        values.put("qsNumber", existing == null ? reference(offset, id) : existing);
+        values.put("eTag", eTag(row));
+        for (var person : PEOPLE.entrySet())
+            readPerson(values, person.getKey(), row.get(person.getValue()));
+        var sorted = new ArrayList<>(entries);
+        sorted.sort(Comparator.comparing(ProgressLogEntry::getTs));
+        values.put("progressLog", sorted);
+        return json.convertValue(values, Issue.class);
+    }
+
+    private ProgressLogEntry toProgress(Map<String, Object> row) {
+        var values = new LinkedHashMap<String, Object>();
+        values.put("id", number(row.get("Id")));
+        values.put("text", text(row.get("EntryText")));
+        values.put("ts", text(row.get("Created")));
+        readPerson(values, "author", row.get("Author"));
+        return json.convertValue(values, ProgressLogEntry.class);
+    }
+
+    private void readPerson(Map<String, Object> values, String name, Object raw) {
+        Map<?, ?> person = raw instanceof Map<?, ?> map ? map : Map.of();
+        values.put(name, text(person.get("Title")));
+        values.put(name + "Id", number(person.get("Id")));
+        String email = text(person.get("EMail"));
+        if (email.isBlank()) {
+            String login = text(person.get("Name"));
+            email = login.contains("|") ? login.substring(login.lastIndexOf('|') + 1) : "";
+        }
+        values.put(name + "Email", email);
+    }
+
+    private Map<String, Object> toFields(Map<String, Object> input) {
+        var fields = new LinkedHashMap<String, Object>();
+        for (var field : FIELDS.entrySet()) {
+            String name = field.getKey();
+            if (!input.containsKey(name)) continue;
+            Object value = input.get(name);
+            if (BOOLS.contains(name)) value = Boolean.TRUE.equals(value) ? "Yes" : "No";
+            else if (CalendarDates.FIELDS.contains(name)) {
+                String date = CalendarDates.normalize(text(value));
+                value = date.isEmpty() ? null : date;
+            } else if (TIMESTAMPS.contains(name) && text(value).isEmpty()) value = null;
+            fields.put(field.getValue(), value);
+        }
+        if (input.containsKey("shortSummary")) fields.put("Title", text(input.get("shortSummary")));
+        for (var person : PEOPLE.entrySet()) {
+            String name = person.getKey();
+            if (!input.containsKey(name)
+                    && !input.containsKey(name + "Id")
+                    && !input.containsKey(name + "Email")) continue;
+            String email = text(input.get(name + "Email"));
+            if (!email.isBlank()) {
+                SharePointUser user;
+                try {
+                    user = client.ensureUser(email);
+                } catch (org.springframework.web.client.HttpClientErrorException invalidUser) {
+                    if (invalidUser.getStatusCode().value() != 400) throw invalidUser;
+                    throw new IssueOperationException(
+                            400,
+                            "INVALID_PERSON",
+                            "The Microsoft 365 identity could not be resolved for " + name + ".");
+                }
+                if (user.id() <= 0)
+                    throw new IssueOperationException(
+                            400,
+                            "INVALID_PERSON",
+                            "The Microsoft 365 identity could not be resolved.");
+                fields.put(person.getValue() + "Id", user.id());
+            } else if (input.containsKey(name + "Id")) {
+                Long id = number(input.get(name + "Id"));
+                fields.put(person.getValue() + "Id", id != null && id > 0 ? id : null);
+            } else if (input.containsKey(name + "Email")
+                    || (input.containsKey(name) && text(input.get(name)).isEmpty()))
+                fields.put(person.getValue() + "Id", null);
+            else
+                throw new IssueOperationException(
+                        400,
+                        "INVALID_PERSON",
+                        "A Microsoft 365 email or lookup ID is required for " + name + ".");
+        }
         return fields;
     }
 
-    private void putIfNotNull(Map<String, Object> map, String key, Object value) {
-        if (value != null) {
-            map.put(key, value);
-        }
-    }
-
-    private String boolToYesNo(Boolean value) {
-        return Boolean.TRUE.equals(value) ? "Yes" : "No";
-    }
-
-    private String stringOf(Object value) {
+    public static String eTag(Map<String, Object> row) {
+        Object value = row.get("odata.etag");
+        if (value == null) value = row.get("@odata.etag");
+        if (value == null && row.get("__metadata") instanceof Map<?, ?> metadata)
+            value = metadata.get("etag");
         return value == null ? null : value.toString();
     }
 
-    private Integer intOf(Object value) {
-        return value == null ? null : Integer.valueOf(value.toString());
+    public static String text(Object value) {
+        return value == null ? "" : value.toString();
     }
 
-    private Long longOf(Object value) {
-        return value == null ? null : Long.valueOf(value.toString());
+    public static Long number(Object value) {
+        return value == null ? null : new BigDecimal(value.toString()).longValueExact();
     }
 }
